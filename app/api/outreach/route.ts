@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAnthropicClient } from "@/lib/ai/client";
 import { fetchPersonContext } from "@/lib/api/person-context";
+import { fetchUserProfile } from "@/lib/api/user-profile";
 
 /**
  * POST /api/outreach
  * Body: { user_id, person_id }
- * Generates outreach strategy suggestions with ready-to-send messages.
  */
 export async function POST(request: NextRequest) {
-  const { person_id } = await request.json();
+  const { user_id, person_id } = await request.json();
 
   if (!person_id) {
     return NextResponse.json(
@@ -17,12 +17,35 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const ctx = await fetchPersonContext(person_id);
+  const [ctx, userProfile] = await Promise.all([
+    fetchPersonContext(person_id),
+    user_id ? fetchUserProfile(user_id) : Promise.resolve(null),
+  ]);
+
   if (!ctx) {
     return NextResponse.json({ error: "Person not found" }, { status: 404 });
   }
 
-  const userContent = `Person: ${ctx.displayLabel}
+  // Build user context section
+  let userContextBlock = "";
+  if (userProfile) {
+    const parts = [
+      userProfile.profile_summary
+        ? `About the user: ${userProfile.profile_summary}`
+        : null,
+      (userProfile.personal_interests as string[])?.length
+        ? `User's interests: ${(userProfile.personal_interests as string[]).join(", ")}`
+        : null,
+      (userProfile.skills as string[])?.length
+        ? `User's skills: ${(userProfile.skills as string[]).join(", ")}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    if (parts) userContextBlock = parts + "\n\n";
+  }
+
+  const userContent = `${userContextBlock}Person: ${ctx.displayLabel}
 Relationship strength: ${ctx.person.relationship_strength ?? "unknown"}
 Last interaction: ${ctx.lastInteractionDate}
 
@@ -60,7 +83,6 @@ Return JSON with this exact structure:
   const text =
     response.content[0].type === "text" ? response.content[0].text : "";
 
-  // Parse JSON from response
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start === -1 || end <= start) {

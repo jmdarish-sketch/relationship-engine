@@ -4,6 +4,17 @@ export interface User {
   name: string | null;
   omi_api_key: string | null;
   created_at: string;
+  password_hash: string | null;
+  school: string | null;
+  graduation_year: number | null;
+  major: string | null;
+  career_interests: string[];
+  user_current_role: string | null;
+  networking_goals: string | null;
+  personal_interests: string[];
+  skills: string[];
+  onboarding_completed: boolean;
+  profile_summary: string | null;
 }
 
 export interface Person {

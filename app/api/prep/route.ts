@@ -5,11 +5,11 @@ import {
   SYNTHESIS_SYSTEM_PROMPT,
   SYNTHESIS_USER_PROMPT,
 } from "@/lib/prompts/synthesis";
+import { fetchUserProfile } from "@/lib/api/user-profile";
 
 /**
  * POST /api/prep
- * Body: { user_id, person_id, goals?: string }
- * Generates conversation prep using Claude Sonnet.
+ * Body: { user_id, person_id, context?: string, goals?: string }
  */
 export async function POST(request: NextRequest) {
   const { user_id, person_id, context, goals } = await request.json();
@@ -23,20 +23,22 @@ export async function POST(request: NextRequest) {
 
   const supabase = createAdminClient();
 
-  // Fetch person
-  const { data: person, error: personError } = await supabase
-    .from("people")
-    .select(
-      "display_label, first_name, last_name, evolving_profile, identity_fingerprint, relationship_strength"
-    )
-    .eq("id", person_id)
-    .single();
+  const [person_res, userProfile] = await Promise.all([
+    supabase
+      .from("people")
+      .select(
+        "display_label, first_name, last_name, evolving_profile, identity_fingerprint, relationship_strength"
+      )
+      .eq("id", person_id)
+      .single(),
+    fetchUserProfile(user_id),
+  ]);
 
-  if (personError || !person) {
+  const person = person_res.data;
+  if (!person) {
     return NextResponse.json({ error: "Person not found" }, { status: 404 });
   }
 
-  // Fetch related data in parallel
   const [interactionLinksRes, detailsRes, insightsRes] = await Promise.all([
     supabase
       .from("interaction_people")
@@ -56,7 +58,6 @@ export async function POST(request: NextRequest) {
       .order("created_at", { ascending: false }),
   ]);
 
-  // Fetch interactions by linked ids
   const interactionIds = (interactionLinksRes.data ?? []).map(
     (l) => l.interaction_id
   );
@@ -75,7 +76,6 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // Format details history
   const detailsHistory = (detailsRes.data ?? [])
     .map(
       (d) =>
@@ -83,22 +83,23 @@ export async function POST(request: NextRequest) {
     )
     .join("\n");
 
-  // Format insights
   const insightsText = (insightsRes.data ?? [])
     .map((i) => `[${i.insight_type}] ${i.content}`)
     .join("\n");
 
-  // Build the user prompt with template variables replaced
   const displayLabel =
     person.display_label ??
-    [person.first_name, person.last_name].filter(Boolean).join(" ") ??
-    "Unknown";
+    ([person.first_name, person.last_name].filter(Boolean).join(" ") ||
+      "Unknown");
 
-  const filledPrompt = SYNTHESIS_USER_PROMPT.replace(
+  let filledPrompt = SYNTHESIS_USER_PROMPT.replace(
     "{person_display_label}",
     displayLabel
   )
-    .replace("{relationship_strength}", person.relationship_strength ?? "unknown")
+    .replace(
+      "{relationship_strength}",
+      person.relationship_strength ?? "unknown"
+    )
     .replace("{last_interaction_date}", lastInteractionDate)
     .replace(
       "{identity_fingerprint}",
@@ -115,21 +116,25 @@ export async function POST(request: NextRequest) {
     .replace("{relevant_insights}", insightsText || "No cross-references yet")
     .replace("{user_goals}", goals || "No specific goals stated");
 
-  // Insert meeting context line before user goals if provided
-  const finalPrompt = context
-    ? filledPrompt.replace(
-        "User's stated goals for this meeting:",
-        `Meeting context: ${context}\n\nUser's stated goals for this meeting:`
-      )
-    : filledPrompt;
+  // Add user profile context
+  if (userProfile?.profile_summary) {
+    filledPrompt = `About the user: ${userProfile.profile_summary}\n\n${filledPrompt}`;
+  }
 
-  // Call Claude Sonnet
+  // Insert meeting context line before user goals if provided
+  if (context) {
+    filledPrompt = filledPrompt.replace(
+      "User's stated goals for this meeting:",
+      `Meeting context: ${context}\n\nUser's stated goals for this meeting:`
+    );
+  }
+
   const client = getAnthropicClient();
   const response = await client.messages.create({
     model: "claude-sonnet-4-20250514",
     max_tokens: 2048,
     system: SYNTHESIS_SYSTEM_PROMPT,
-    messages: [{ role: "user", content: finalPrompt }],
+    messages: [{ role: "user", content: filledPrompt }],
   });
 
   const text =

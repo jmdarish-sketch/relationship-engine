@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAnthropicClient } from "@/lib/ai/client";
 import { fetchPersonContext } from "@/lib/api/person-context";
+import { fetchUserProfile } from "@/lib/api/user-profile";
 
 /**
  * POST /api/overview
  * Body: { user_id, person_id }
- * Generates a natural-language overview paragraph about a person.
  */
 export async function POST(request: NextRequest) {
-  const { person_id } = await request.json();
+  const { user_id, person_id } = await request.json();
 
   if (!person_id) {
     return NextResponse.json(
@@ -17,12 +17,16 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const ctx = await fetchPersonContext(person_id);
+  const [ctx, userProfile] = await Promise.all([
+    fetchPersonContext(person_id),
+    user_id ? fetchUserProfile(user_id) : Promise.resolve(null),
+  ]);
+
   if (!ctx) {
     return NextResponse.json({ error: "Person not found" }, { status: 404 });
   }
 
-  const userContent = `Person being described: ${ctx.displayLabel}
+  let userContent = `Person being described: ${ctx.displayLabel}
 
 Known details:
 Identity: ${JSON.stringify(ctx.person.identity_fingerprint ?? {}, null, 2)}
@@ -36,6 +40,10 @@ Cross-references and insights:
 ${ctx.insightsFormatted || "None yet"}
 
 Last interaction: ${ctx.lastInteractionDate}`;
+
+  if (userProfile?.profile_summary) {
+    userContent = `About the user: ${userProfile.profile_summary}\n\n${userContent}`;
+  }
 
   const client = getAnthropicClient();
   const response = await client.messages.create({

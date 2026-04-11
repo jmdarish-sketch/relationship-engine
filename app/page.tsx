@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-
-const USER_ID = "b56afcb3-4f92-4e9a-9467-3105972f34dd";
+import { useRouter } from "next/navigation";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -224,6 +223,10 @@ function ChevronDown({ className = "h-4 w-4" }: { className?: string }) {
 // ---------------------------------------------------------------------------
 
 export default function Dashboard() {
+  const router = useRouter();
+  const [userId, setUserId] = useState<string | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
   const [people, setPeople] = useState<PersonSummary[]>([]);
   const [search, setSearch] = useState("");
   const [searchFocused, setSearchFocused] = useState(false);
@@ -266,25 +269,48 @@ export default function Dashboard() {
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
+  // --- Auth check ---
+  useEffect(() => {
+    const storedId = localStorage.getItem("user_id");
+    if (!storedId) {
+      router.push("/login");
+      return;
+    }
+    const stored = localStorage.getItem("user");
+    if (stored) {
+      const user = JSON.parse(stored);
+      if (!user.onboarding_completed) {
+        router.push("/onboarding");
+        return;
+      }
+    }
+    setUserId(storedId);
+    setAuthChecked(true);
+  }, [router]);
+
   // --- Data fetching ---
   const fetchPeople = useCallback(async () => {
-    const res = await fetch(`/api/people?user_id=${USER_ID}`);
+    if (!userId) return;
+    const res = await fetch(`/api/people?user_id=${userId}`);
     const data = await res.json();
     setPeople(data.people ?? []);
-  }, []);
+  }, [userId]);
 
   const fetchDisambiguation = useCallback(async () => {
-    const res = await fetch(`/api/disambiguation?user_id=${USER_ID}`);
+    if (!userId) return;
+    const res = await fetch(`/api/disambiguation?user_id=${userId}`);
     if (res.ok) {
       const data = await res.json();
       setDisambiguationItems(data.items ?? []);
     }
-  }, []);
+  }, [userId]);
 
   useEffect(() => {
-    fetchPeople();
-    fetchDisambiguation();
-  }, [fetchPeople, fetchDisambiguation]);
+    if (userId) {
+      fetchPeople();
+      fetchDisambiguation();
+    }
+  }, [userId, fetchPeople, fetchDisambiguation]);
 
   // Fetch person detail + overview on selection
   useEffect(() => {
@@ -314,12 +340,12 @@ export default function Dashboard() {
     fetch("/api/overview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: USER_ID, person_id: selectedId }),
+      body: JSON.stringify({ user_id: userId, person_id: selectedId }),
     })
       .then((r) => r.json())
       .then((d) => setOverview(d.overview ?? null))
       .finally(() => setOverviewLoading(false));
-  }, [selectedId]);
+  }, [selectedId, userId]);
 
   // --- Actions ---
   function selectPerson(id: string) {
@@ -336,7 +362,7 @@ export default function Dashboard() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        user_id: USER_ID,
+        user_id: userId,
         person_id: selectedId,
         context: prepContext || undefined,
         goals: prepGoals || undefined,
@@ -355,7 +381,7 @@ export default function Dashboard() {
     const res = await fetch("/api/outreach", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: USER_ID, person_id: selectedId }),
+      body: JSON.stringify({ user_id: userId, person_id: selectedId }),
     });
     const data = await res.json();
     setOutreachStrategies(data.strategies ?? null);
@@ -384,6 +410,15 @@ export default function Dashboard() {
     navigator.clipboard.writeText(text);
     setCopied(idx);
     setTimeout(() => setCopied(null), 2000);
+  }
+
+  // --- Loading state while checking auth ---
+  if (!authChecked) {
+    return (
+      <div className="flex min-h-full items-center justify-center">
+        <p className="text-sm text-zinc-400">Loading...</p>
+      </div>
+    );
   }
 
   // --- Derived ---
