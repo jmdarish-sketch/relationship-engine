@@ -12,6 +12,18 @@ interface ProcessResult {
   details_stored: number;
   insights_stored: number;
   action_items_stored: number;
+  pipeline_status: string;
+}
+
+async function setPipelineStatus(
+  supabase: SupabaseClient,
+  interactionId: string,
+  status: string
+) {
+  await supabase
+    .from("interactions")
+    .update({ pipeline_status: status })
+    .eq("id", interactionId);
 }
 
 /**
@@ -23,8 +35,26 @@ export async function processInteraction(
   userId: string,
   transcript: string
 ): Promise<ProcessResult> {
+  const fail = (status: string): ProcessResult => ({
+    interaction_id: interactionId,
+    is_relevant: false,
+    relevance_score: 0,
+    speakers_resolved: 0,
+    details_stored: 0,
+    insights_stored: 0,
+    action_items_stored: 0,
+    pipeline_status: status,
+  });
+
   // Step 1: Relevance filter (Haiku)
-  const relevance = await filterRelevance(transcript);
+  let relevance;
+  try {
+    relevance = await filterRelevance(transcript);
+  } catch (err) {
+    console.error("[pipeline] Relevance filter failed:", err);
+    await setPipelineStatus(supabase, interactionId, "relevance_failed");
+    return fail("relevance_failed");
+  }
 
   if (!relevance.is_relevant || relevance.confidence < 0.4) {
     await supabase
@@ -32,6 +62,7 @@ export async function processInteraction(
       .update({
         is_relevant: false,
         relevance_score: relevance.confidence,
+        pipeline_status: "completed",
       })
       .eq("id", interactionId);
 
@@ -43,11 +74,26 @@ export async function processInteraction(
       details_stored: 0,
       insights_stored: 0,
       action_items_stored: 0,
+      pipeline_status: "completed",
     };
   }
 
   // Step 2: Full extraction (Sonnet)
-  const extraction = await extractFromTranscript(transcript);
+  let extraction;
+  try {
+    extraction = await extractFromTranscript(transcript);
+  } catch (err) {
+    console.error("[pipeline] Extraction failed:", err);
+    await supabase
+      .from("interactions")
+      .update({
+        is_relevant: true,
+        relevance_score: relevance.confidence,
+        pipeline_status: "extraction_failed",
+      })
+      .eq("id", interactionId);
+    return fail("extraction_failed");
+  }
 
   // Double-check: extraction can also flag as irrelevant
   if (!extraction.is_relevant) {
@@ -56,6 +102,7 @@ export async function processInteraction(
       .update({
         is_relevant: false,
         relevance_score: extraction.relevance_score,
+        pipeline_status: "completed",
       })
       .eq("id", interactionId);
 
@@ -67,6 +114,7 @@ export async function processInteraction(
       details_stored: 0,
       insights_stored: 0,
       action_items_stored: 0,
+      pipeline_status: "completed",
     };
   }
 
@@ -80,12 +128,19 @@ export async function processInteraction(
     .eq("id", interactionId);
 
   // Step 3: Resolve speakers to Person records
-  const resolvedSpeakers = await resolveSpeakers(
-    supabase,
-    userId,
-    interactionId,
-    extraction.speakers
-  );
+  let resolvedSpeakers;
+  try {
+    resolvedSpeakers = await resolveSpeakers(
+      supabase,
+      userId,
+      interactionId,
+      extraction.speakers
+    );
+  } catch (err) {
+    console.error("[pipeline] Speaker resolution failed:", err);
+    await setPipelineStatus(supabase, interactionId, "resolution_failed");
+    return fail("resolution_failed");
+  }
 
   // Build a name→person_id map for storing details
   const speakerPersonMap = new Map<string, string>();
@@ -100,29 +155,50 @@ export async function processInteraction(
   }
 
   // Step 4: Store extracted details
-  const detailsStored = await storeExtractedDetails(
-    supabase,
-    interactionId,
-    extraction,
-    speakerPersonMap
-  );
+  let detailsStored = 0;
+  try {
+    detailsStored = await storeExtractedDetails(
+      supabase,
+      interactionId,
+      extraction,
+      speakerPersonMap
+    );
+  } catch (err) {
+    console.error("[pipeline] Storing details failed:", err);
+    await setPipelineStatus(supabase, interactionId, "storage_failed");
+    return fail("storage_failed");
+  }
 
   // Step 5: Store cross-references as insights
-  const insightsStored = await storeCrossReferences(
-    supabase,
-    userId,
-    interactionId,
-    extraction,
-    speakerPersonMap
-  );
+  let insightsStored = 0;
+  try {
+    insightsStored = await storeCrossReferences(
+      supabase,
+      userId,
+      interactionId,
+      extraction,
+      speakerPersonMap
+    );
+  } catch (err) {
+    console.error("[pipeline] Storing insights failed:", err);
+    // Non-fatal — continue
+  }
 
   // Step 6: Store action items as extracted_details with detail_type='action_item'
-  const actionItemsStored = await storeActionItems(
-    supabase,
-    interactionId,
-    extraction,
-    speakerPersonMap
-  );
+  let actionItemsStored = 0;
+  try {
+    actionItemsStored = await storeActionItems(
+      supabase,
+      interactionId,
+      extraction,
+      speakerPersonMap
+    );
+  } catch (err) {
+    console.error("[pipeline] Storing action items failed:", err);
+    // Non-fatal — continue
+  }
+
+  await setPipelineStatus(supabase, interactionId, "completed");
 
   return {
     interaction_id: interactionId,
@@ -132,6 +208,7 @@ export async function processInteraction(
     details_stored: detailsStored,
     insights_stored: insightsStored,
     action_items_stored: actionItemsStored,
+    pipeline_status: "completed",
   };
 }
 
@@ -139,15 +216,12 @@ function resolvePersonId(
   personRef: string,
   speakerPersonMap: Map<string, string>
 ): string | null {
-  // Try exact match on speaker_id (e.g. "SPEAKER_00")
   const byId = speakerPersonMap.get(personRef);
   if (byId) return byId;
 
-  // Try lowercase name match
   const byName = speakerPersonMap.get(personRef.toLowerCase());
   if (byName) return byName;
 
-  // Try partial match
   for (const [key, id] of speakerPersonMap) {
     if (
       key.toLowerCase().includes(personRef.toLowerCase()) ||

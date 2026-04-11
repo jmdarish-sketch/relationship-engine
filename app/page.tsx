@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 
 const USER_ID = "b56afcb3-4f92-4e9a-9467-3105972f34dd";
 
@@ -17,12 +17,11 @@ interface PersonSummary {
   last_seen: string;
   relationship_strength: string | null;
   evolving_profile: Record<string, unknown>;
+  preview: string | null;
 }
 
 interface PersonDetail {
-  person: PersonSummary & {
-    identity_fingerprint: Record<string, string>;
-  };
+  person: PersonSummary & { identity_fingerprint: Record<string, string> };
   extracted_details: {
     id: string;
     detail_type: string;
@@ -77,9 +76,25 @@ interface PrepResult {
   }[];
 }
 
+interface OutreachStrategy {
+  channel: "linkedin" | "text" | "email";
+  rationale: string;
+  subject?: string;
+  message: string;
+  tone: string;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+const NAME_SIGNALS = new Set([
+  "first_name",
+  "last_name",
+  "full_name",
+  "formal_name",
+  "nickname",
+]);
 
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -93,16 +108,27 @@ function timeAgo(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString();
 }
 
-function personName(p: { display_label: string | null; first_name: string | null; last_name: string | null }): string {
-  return p.display_label ?? ([p.first_name, p.last_name].filter(Boolean).join(" ") || "Unknown");
+function personName(p: {
+  display_label: string | null;
+  first_name: string | null;
+  last_name: string | null;
+}): string {
+  return (
+    p.display_label ??
+    ([p.first_name, p.last_name].filter(Boolean).join(" ") || "Unknown")
+  );
 }
 
-// Deduplicate identity signals — keep highest confidence per (type, value)
 function dedupeSignals(
-  signals: { signal_type: string; signal_value: string; confidence: number | null }[]
-): { signal_type: string; signal_value: string; confidence: number | null }[] {
-  const map = new Map<string, typeof signals[number]>();
+  signals: {
+    signal_type: string;
+    signal_value: string;
+    confidence: number | null;
+  }[]
+) {
+  const map = new Map<string, (typeof signals)[number]>();
   for (const s of signals) {
+    if (NAME_SIGNALS.has(s.signal_type)) continue;
     const key = `${s.signal_type}::${s.signal_value.toLowerCase()}`;
     const existing = map.get(key);
     if (!existing || (s.confidence ?? 0) > (existing.confidence ?? 0)) {
@@ -112,31 +138,106 @@ function dedupeSignals(
   return Array.from(map.values());
 }
 
-// Group extracted details by detail_type
-function groupByType<T extends { detail_type: string }>(items: T[]): Record<string, T[]> {
+function groupByType<T extends { detail_type: string }>(
+  items: T[]
+): Record<string, T[]> {
   const groups: Record<string, T[]> = {};
   for (const item of items) {
-    const key = item.detail_type;
-    if (!groups[key]) groups[key] = [];
-    groups[key].push(item);
+    if (!groups[item.detail_type]) groups[item.detail_type] = [];
+    groups[item.detail_type].push(item);
   }
   return groups;
 }
 
+const channelStyle: Record<string, { bg: string; text: string }> = {
+  linkedin: { bg: "bg-blue-100", text: "text-blue-700" },
+  text: { bg: "bg-green-100", text: "text-green-700" },
+  email: { bg: "bg-purple-100", text: "text-purple-700" },
+};
+
+const channelLabels: Record<string, string> = {
+  linkedin: "LinkedIn",
+  text: "Text",
+  email: "Email",
+};
+
 // ---------------------------------------------------------------------------
-// Component
+// Icons (inline SVG)
+// ---------------------------------------------------------------------------
+
+function SearchIcon({ className = "h-5 w-5" }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      viewBox="0 0 24 24"
+      strokeWidth={1.5}
+      stroke="currentColor"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"
+      />
+    </svg>
+  );
+}
+
+function ChevronLeft({ className = "h-5 w-5" }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      stroke="currentColor"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M15.75 19.5L8.25 12l7.5-7.5"
+      />
+    </svg>
+  );
+}
+
+function ChevronDown({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      stroke="currentColor"
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M19.5 8.25l-7.5 7.5-7.5-7.5"
+      />
+    </svg>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main Component
 // ---------------------------------------------------------------------------
 
 export default function Dashboard() {
   const [people, setPeople] = useState<PersonSummary[]>([]);
+  const [search, setSearch] = useState("");
+  const [searchFocused, setSearchFocused] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PersonDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  const [disambiguationItems, setDisambiguationItems] = useState<DisambiguationItem[]>([]);
-  const [disambiguationPeople, setDisambiguationPeople] = useState<
-    Record<string, PersonSummary>
-  >({});
+  const [overview, setOverview] = useState<string | null>(null);
+  const [overviewLoading, setOverviewLoading] = useState(false);
+
+  const [disambiguationItems, setDisambiguationItems] = useState<
+    DisambiguationItem[]
+  >([]);
+  const [disambiguationOpen, setDisambiguationOpen] = useState(false);
 
   const [prepResult, setPrepResult] = useState<PrepResult | null>(null);
   const [prepLoading, setPrepLoading] = useState(false);
@@ -144,55 +245,89 @@ export default function Dashboard() {
   const [prepContext, setPrepContext] = useState("");
   const [prepGoals, setPrepGoals] = useState("");
 
-  // Fetch people list
+  const [outreachStrategies, setOutreachStrategies] = useState<
+    OutreachStrategy[] | null
+  >(null);
+  const [outreachLoading, setOutreachLoading] = useState(false);
+
+  const [detailsExpanded, setDetailsExpanded] = useState(false);
+  const [copied, setCopied] = useState<number | null>(null);
+
+  const searchRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
+        setSearchFocused(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
+
+  // --- Data fetching ---
   const fetchPeople = useCallback(async () => {
     const res = await fetch(`/api/people?user_id=${USER_ID}`);
     const data = await res.json();
     setPeople(data.people ?? []);
   }, []);
 
-  // Fetch disambiguation queue
   const fetchDisambiguation = useCallback(async () => {
-    // We don't have a dedicated list endpoint, so we'll use supabase client.
-    // For simplicity, call the people endpoint to get all people for candidate lookup,
-    // and use a lightweight fetch for the queue.
     const res = await fetch(`/api/disambiguation?user_id=${USER_ID}`);
     if (res.ok) {
       const data = await res.json();
       setDisambiguationItems(data.items ?? []);
-      // Build a lookup of candidate people
-      const lookup: Record<string, PersonSummary> = {};
-      for (const p of people) {
-        lookup[p.id] = p;
-      }
-      setDisambiguationPeople(lookup);
     }
-  }, [people]);
+  }, []);
 
   useEffect(() => {
     fetchPeople();
-  }, [fetchPeople]);
+    fetchDisambiguation();
+  }, [fetchPeople, fetchDisambiguation]);
 
-  useEffect(() => {
-    if (people.length > 0) fetchDisambiguation();
-  }, [people, fetchDisambiguation]);
-
-  // Fetch person detail
+  // Fetch person detail + overview on selection
   useEffect(() => {
     if (!selectedId) {
       setDetail(null);
+      setOverview(null);
+      setPrepResult(null);
+      setOutreachStrategies(null);
+      setShowPrepInput(false);
+      setDetailsExpanded(false);
       return;
     }
+
     setDetailLoading(true);
+    setOverview(null);
+    setOverviewLoading(true);
     setPrepResult(null);
+    setOutreachStrategies(null);
     setShowPrepInput(false);
+    setDetailsExpanded(false);
+
     fetch(`/api/people/${selectedId}`)
       .then((r) => r.json())
       .then((d) => setDetail(d))
       .finally(() => setDetailLoading(false));
+
+    fetch("/api/overview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: USER_ID, person_id: selectedId }),
+    })
+      .then((r) => r.json())
+      .then((d) => setOverview(d.overview ?? null))
+      .finally(() => setOverviewLoading(false));
   }, [selectedId]);
 
-  // Run prep
+  // --- Actions ---
+  function selectPerson(id: string) {
+    setSelectedId(id);
+    setSearch("");
+    setSearchFocused(false);
+  }
+
   async function runPrep() {
     if (!selectedId) return;
     setPrepLoading(true);
@@ -213,7 +348,20 @@ export default function Dashboard() {
     setShowPrepInput(false);
   }
 
-  // Resolve disambiguation
+  async function runOutreach() {
+    if (!selectedId) return;
+    setOutreachLoading(true);
+    setOutreachStrategies(null);
+    const res = await fetch("/api/outreach", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: USER_ID, person_id: selectedId }),
+    });
+    const data = await res.json();
+    setOutreachStrategies(data.strategies ?? null);
+    setOutreachLoading(false);
+  }
+
   async function resolveDisambiguation(
     queueItemId: string,
     resolvedPersonId?: string,
@@ -232,441 +380,661 @@ export default function Dashboard() {
     fetchPeople();
   }
 
+  function copyToClipboard(text: string, idx: number) {
+    navigator.clipboard.writeText(text);
+    setCopied(idx);
+    setTimeout(() => setCopied(null), 2000);
+  }
+
+  // --- Derived ---
   const pendingCount = disambiguationItems.filter(
     (i) => i.resolution_status === "pending"
   ).length;
 
-  return (
-    <div className="flex h-full">
-      {/* ---- Sidebar ---- */}
-      <aside className="w-1/3 min-w-[320px] max-w-[420px] border-r border-zinc-800 flex flex-col bg-zinc-950">
-        <div className="p-4 border-b border-zinc-800">
-          <h1 className="text-lg font-semibold tracking-tight">
-            Relationship Engine
-          </h1>
-          {pendingCount > 0 && (
-            <div className="mt-2 flex items-center gap-2 text-sm text-amber-400">
-              <span className="inline-block h-2 w-2 rounded-full bg-amber-400" />
-              {pendingCount} pending disambiguation{pendingCount !== 1 ? "s" : ""}
+  const filtered = search.trim()
+    ? people.filter((p) =>
+        personName(p).toLowerCase().includes(search.toLowerCase())
+      )
+    : people;
+
+  const showDropdown = searchFocused && search.trim().length > 0;
+
+  const peopleLookup = new Map(people.map((p) => [p.id, p]));
+
+  // =========================================================================
+  // RENDER — Person Page
+  // =========================================================================
+  if (selectedId) {
+    return (
+      <div className="min-h-full bg-white">
+        <div className="mx-auto max-w-2xl px-4 py-6 md:px-6">
+          {/* Back */}
+          <button
+            onClick={() => setSelectedId(null)}
+            className="mb-6 flex items-center gap-1 text-sm text-zinc-400 hover:text-zinc-700 transition-colors"
+          >
+            <ChevronLeft className="h-4 w-4" />
+            Back
+          </button>
+
+          {detailLoading && (
+            <div className="flex items-center justify-center py-24 text-zinc-400">
+              Loading...
             </div>
           )}
-        </div>
 
-        <div className="flex-1 overflow-y-auto">
-          {people.length === 0 && (
-            <p className="p-4 text-sm text-zinc-500">No people yet.</p>
-          )}
-          {people.map((p) => (
-            <button
-              key={p.id}
-              onClick={() => setSelectedId(p.id)}
-              className={`w-full text-left px-4 py-3 border-b border-zinc-800/50 transition-colors hover:bg-zinc-900 ${
-                selectedId === p.id ? "bg-zinc-900" : ""
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <span className="font-medium text-sm truncate">
-                  {personName(p)}
-                </span>
-                <span className="ml-2 shrink-0 rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">
-                  {p.interaction_count}
-                </span>
-              </div>
-              <div className="mt-1 flex items-center gap-2 text-xs text-zinc-500">
-                <span>{timeAgo(p.last_seen)}</span>
-                {p.relationship_strength && (
-                  <>
-                    <span className="text-zinc-700">·</span>
-                    <span>{p.relationship_strength}</span>
-                  </>
+          {detail && !detailLoading && (
+            <div className="space-y-6">
+              {/* Header */}
+              <div>
+                <h1 className="text-3xl font-semibold text-zinc-900">
+                  {personName(detail.person)}
+                </h1>
+                {detail.person.display_label &&
+                  detail.person.display_label !==
+                    personName({
+                      ...detail.person,
+                      display_label: null,
+                    }) && (
+                    <p className="mt-1 text-sm text-zinc-500">
+                      {detail.person.display_label}
+                    </p>
+                  )}
+                {detail.identity_signals.length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {dedupeSignals(detail.identity_signals).map((s) => (
+                      <span
+                        key={s.signal_type + s.signal_value}
+                        className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs text-zinc-600"
+                      >
+                        {s.signal_value}
+                      </span>
+                    ))}
+                  </div>
                 )}
               </div>
-            </button>
-          ))}
-        </div>
-      </aside>
 
-      {/* ---- Main content ---- */}
-      <main className="flex-1 overflow-y-auto">
-        {!selectedId && (
-          <div className="flex h-full items-center justify-center text-zinc-600">
-            <p>Select a person to view their profile</p>
-          </div>
-        )}
-
-        {selectedId && detailLoading && (
-          <div className="flex h-full items-center justify-center text-zinc-600">
-            <p>Loading...</p>
-          </div>
-        )}
-
-        {selectedId && detail && !detailLoading && (
-          <div className="max-w-3xl mx-auto p-6 space-y-8">
-            {/* Header */}
-            <div>
-              <h2 className="text-2xl font-semibold">
-                {personName(detail.person)}
-              </h2>
-              {detail.person.display_label &&
-                detail.person.display_label !==
-                  [detail.person.first_name, detail.person.last_name]
-                    .filter(Boolean)
-                    .join(" ") && (
-                  <p className="text-sm text-zinc-500 mt-1">
-                    {detail.person.display_label}
+              {/* Overview Card */}
+              <div className="rounded-xl border border-zinc-200 bg-white p-5">
+                {overviewLoading ? (
+                  <div className="space-y-2.5 animate-pulse">
+                    <div className="h-3.5 w-3/4 rounded bg-zinc-100" />
+                    <div className="h-3.5 w-full rounded bg-zinc-100" />
+                    <div className="h-3.5 w-5/6 rounded bg-zinc-100" />
+                    <div className="h-3.5 w-2/3 rounded bg-zinc-100" />
+                  </div>
+                ) : overview ? (
+                  <p className="text-sm leading-relaxed text-zinc-700">
+                    {overview}
+                  </p>
+                ) : (
+                  <p className="text-sm text-zinc-400">
+                    Not enough data for an overview yet.
                   </p>
                 )}
-            </div>
-
-            {/* Identity signals as pills */}
-            {detail.identity_signals.length > 0 && (
-              <div className="flex flex-wrap gap-2">
-                {dedupeSignals(detail.identity_signals).map((s) => (
-                  <span
-                    key={s.signal_type + s.signal_value}
-                    className="rounded-full bg-zinc-800 px-3 py-1 text-xs text-zinc-300"
-                  >
-                    {s.signal_value}
-                  </span>
-                ))}
               </div>
-            )}
 
-            {/* Evolving profile */}
-            {detail.person.evolving_profile &&
-              Object.keys(detail.person.evolving_profile).length > 0 && (
-                <section>
-                  <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider mb-2">
-                    Profile
-                  </h3>
-                  <div className="rounded-lg bg-zinc-900 p-4 text-sm text-zinc-300 space-y-1">
-                    {Object.entries(detail.person.evolving_profile).map(
-                      ([k, v]) => (
-                        <div key={k}>
-                          <span className="text-zinc-500">{k}:</span>{" "}
-                          {String(v)}
-                        </div>
-                      )
-                    )}
-                  </div>
-                </section>
+              {/* Action Buttons */}
+              <div className="flex flex-col gap-3 md:flex-row">
+                <button
+                  onClick={() => {
+                    setShowPrepInput(!showPrepInput);
+                    if (showPrepInput) {
+                      setPrepResult(null);
+                      setPrepContext("");
+                      setPrepGoals("");
+                    }
+                  }}
+                  className="flex-1 rounded-lg bg-blue-600 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-700 min-h-12"
+                >
+                  Prep for meeting
+                </button>
+                <button
+                  onClick={runOutreach}
+                  disabled={outreachLoading}
+                  className="flex-1 rounded-lg border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 min-h-12"
+                >
+                  {outreachLoading ? "Generating..." : "Outreach strategies"}
+                </button>
+              </div>
+
+              {/* Prep Input */}
+              {showPrepInput && (
+                <div className="space-y-3 rounded-xl border border-zinc-200 bg-zinc-50 p-5">
+                  <input
+                    type="text"
+                    placeholder="Context (e.g. coffee chat, networking event)"
+                    value={prepContext}
+                    onChange={(e) => setPrepContext(e.target.value)}
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-4 py-2.5 text-sm text-zinc-900 placeholder-zinc-400 focus:border-blue-500 focus:outline-none"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Goals (e.g. ask about Centerview, get warm intro)"
+                    value={prepGoals}
+                    onChange={(e) => setPrepGoals(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && runPrep()}
+                    className="w-full rounded-lg border border-zinc-200 bg-white px-4 py-2.5 text-sm text-zinc-900 placeholder-zinc-400 focus:border-blue-500 focus:outline-none"
+                  />
+                  <button
+                    onClick={runPrep}
+                    disabled={prepLoading}
+                    className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50 min-h-12"
+                  >
+                    {prepLoading ? "Generating..." : "Generate prep"}
+                  </button>
+                </div>
               )}
 
-            {/* Interaction timeline */}
-            {detail.interactions.length > 0 && (
-              <section>
-                <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider mb-3">
-                  Interactions
-                </h3>
-                <div className="space-y-3">
-                  {detail.interactions.map((inter) => (
-                    <div
-                      key={inter.id}
-                      className="rounded-lg bg-zinc-900 p-4"
+              {/* Prep Result */}
+              {prepResult && (
+                <div className="space-y-4 rounded-xl border border-zinc-200 bg-white p-5">
+                  <div className="flex items-start justify-between">
+                    <h3 className="text-base font-semibold text-zinc-900">
+                      {prepResult.headline}
+                    </h3>
+                    <button
+                      onClick={() => {
+                        setPrepResult(null);
+                        setPrepContext("");
+                        setPrepGoals("");
+                        setShowPrepInput(false);
+                      }}
+                      className="text-xs text-zinc-400 hover:text-zinc-600"
                     >
-                      <div className="flex items-center gap-2 text-xs text-zinc-500 mb-1">
-                        {inter.started_at && (
-                          <span>
-                            {new Date(inter.started_at).toLocaleDateString(
-                              undefined,
-                              {
-                                month: "short",
-                                day: "numeric",
-                                year: "numeric",
-                              }
-                            )}
-                          </span>
-                        )}
-                        {inter.category && (
-                          <>
-                            <span className="text-zinc-700">·</span>
-                            <span>{inter.category}</span>
-                          </>
-                        )}
-                      </div>
-                      {inter.omi_summary && (
-                        <p className="text-sm text-zinc-300">
-                          {inter.omi_summary}
-                        </p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )}
+                      Clear
+                    </button>
+                  </div>
 
-            {/* Extracted details grouped by type */}
-            {detail.extracted_details.length > 0 && (
-              <section>
-                <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider mb-3">
-                  Extracted Details
-                </h3>
-                <div className="space-y-4">
-                  {Object.entries(
-                    groupByType(detail.extracted_details)
-                  ).map(([type, items]) => (
-                    <div key={type}>
-                      <h4 className="text-xs font-medium text-zinc-500 mb-2 uppercase">
-                        {type.replace(/_/g, " ")}
+                  <p className="text-sm leading-relaxed text-zinc-600">
+                    {prepResult.key_context}
+                  </p>
+
+                  {prepResult.talking_points.length > 0 && (
+                    <div>
+                      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                        Talking Points
                       </h4>
                       <div className="space-y-2">
-                        {items.map((d) => (
+                        {prepResult.talking_points.map((tp, i) => (
                           <div
-                            key={d.id}
-                            className="rounded bg-zinc-900 px-3 py-2 text-sm text-zinc-300 flex items-start justify-between gap-3"
+                            key={i}
+                            className="rounded-lg bg-zinc-50 p-3"
                           >
-                            <span>{d.content}</span>
-                            {d.importance_score != null && (
-                              <span className="shrink-0 text-xs text-zinc-600">
-                                {(d.importance_score * 100).toFixed(0)}%
-                              </span>
-                            )}
+                            <p className="text-sm font-medium text-zinc-800">
+                              {tp.topic}
+                            </p>
+                            <p className="mt-1 text-sm text-zinc-500">
+                              &ldquo;{tp.opener}&rdquo;
+                            </p>
+                            <p className="mt-1 text-xs text-zinc-400">
+                              {tp.why_it_matters}
+                            </p>
                           </div>
                         ))}
                       </div>
                     </div>
-                  ))}
-                </div>
-              </section>
-            )}
+                  )}
 
-            {/* Insights */}
-            {detail.insights.length > 0 && (
-              <section>
-                <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wider mb-3">
-                  Insights
-                </h3>
-                <div className="space-y-2">
-                  {detail.insights.map((ins) => (
-                    <div
-                      key={ins.id}
-                      className="rounded bg-zinc-900 px-3 py-2 text-sm text-zinc-300"
-                    >
-                      <span className="text-xs text-zinc-500 mr-2">
-                        [{ins.insight_type}]
-                      </span>
-                      {ins.content}
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )}
-
-            {/* Prep button */}
-            <section className="border-t border-zinc-800 pt-6">
-              {!showPrepInput && !prepResult && (
-                <button
-                  onClick={() => setShowPrepInput(true)}
-                  className="w-full rounded-lg bg-blue-600 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-500"
-                >
-                  Prep me for this conversation
-                </button>
-              )}
-
-              {showPrepInput && (
-                <div className="space-y-3">
-                  <input
-                    type="text"
-                    placeholder="Context (e.g. coffee chat, networking event, LinkedIn DM follow-up)"
-                    value={prepContext}
-                    onChange={(e) => setPrepContext(e.target.value)}
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-blue-500 focus:outline-none"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Goals (e.g. ask about Centerview, get warm intro to David Park)"
-                    value={prepGoals}
-                    onChange={(e) => setPrepGoals(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && runPrep()}
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-4 py-2.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-blue-500 focus:outline-none"
-                  />
-                  <div className="flex gap-2">
-                    <button
-                      onClick={runPrep}
-                      disabled={prepLoading}
-                      className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-50"
-                    >
-                      {prepLoading ? "Generating..." : "Generate prep"}
-                    </button>
-                    <button
-                      onClick={() => setShowPrepInput(false)}
-                      className="rounded-lg bg-zinc-800 px-4 py-2 text-sm text-zinc-400 transition-colors hover:bg-zinc-700"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {prepLoading && (
-                <div className="mt-4 text-sm text-zinc-500">
-                  Generating conversation prep...
-                </div>
-              )}
-
-              {prepResult && <PrepCard prep={prepResult} onReset={() => { setPrepResult(null); setPrepContext(""); setPrepGoals(""); }} />}
-            </section>
-          </div>
-        )}
-
-        {/* ---- Disambiguation Queue ---- */}
-        {disambiguationItems.filter((i) => i.resolution_status === "pending")
-          .length > 0 && (
-          <div className="max-w-3xl mx-auto p-6 border-t border-zinc-800">
-            <h3 className="text-sm font-semibold text-amber-400 uppercase tracking-wider mb-4">
-              Disambiguation Queue
-            </h3>
-            <div className="space-y-4">
-              {disambiguationItems
-                .filter((i) => i.resolution_status === "pending")
-                .map((item) => (
-                  <div
-                    key={item.id}
-                    className="rounded-lg border border-zinc-800 bg-zinc-900 p-4"
-                  >
-                    <p className="text-sm font-medium text-zinc-200 mb-1">
-                      Who is &quot;{item.detected_name}&quot;?
-                    </p>
-                    <p className="text-xs text-zinc-500 mb-3">
-                      Context:{" "}
-                      {JSON.stringify(item.extracted_context).slice(0, 200)}
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                      {item.candidate_people_ids.map((cid) => {
-                        const candidate = disambiguationPeople[cid];
-                        return (
-                          <button
-                            key={cid}
-                            onClick={() =>
-                              resolveDisambiguation(item.id, cid)
-                            }
-                            className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:border-blue-500 hover:text-blue-400"
+                  {prepResult.open_loops.length > 0 && (
+                    <div>
+                      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                        Open Loops
+                      </h4>
+                      <div className="space-y-2">
+                        {prepResult.open_loops.map((ol, i) => (
+                          <div
+                            key={i}
+                            className="rounded-lg border border-amber-200 bg-amber-50 p-3"
                           >
-                            {candidate
-                              ? personName(candidate)
-                              : cid.slice(0, 8)}
-                          </button>
-                        );
-                      })}
-                      <button
-                        onClick={() =>
-                          resolveDisambiguation(
-                            item.id,
-                            undefined,
-                            true
-                          )
-                        }
-                        className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs text-emerald-400 transition-colors hover:border-emerald-500"
-                      >
-                        + Someone new
-                      </button>
+                            <p className="text-sm text-amber-800">
+                              {ol.description}
+                            </p>
+                            <p className="mt-1 text-xs text-amber-600">
+                              {ol.who_owes_what} &mdash;{" "}
+                              {ol.suggested_approach}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
                     </div>
+                  )}
+
+                  {prepResult.tone_guidance && (
+                    <div className="rounded-lg bg-zinc-50 p-3">
+                      <p className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                        Tone
+                      </p>
+                      <p className="mt-1 text-sm text-zinc-500">
+                        {prepResult.tone_guidance}
+                      </p>
+                    </div>
+                  )}
+
+                  {prepResult.cross_conversation_intel.length > 0 && (
+                    <div>
+                      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                        Intel
+                      </h4>
+                      <div className="space-y-2">
+                        {prepResult.cross_conversation_intel.map((ci, i) => (
+                          <div
+                            key={i}
+                            className="rounded-lg border border-blue-200 bg-blue-50 p-3"
+                          >
+                            <p className="text-sm text-blue-800">
+                              {ci.insight}
+                            </p>
+                            <p className="mt-1 text-xs text-blue-600">
+                              {ci.source_context}
+                            </p>
+                            <p className="mt-1 text-xs text-zinc-400">
+                              {ci.suggested_use}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Outreach Loading */}
+              {outreachLoading && (
+                <div className="space-y-3 animate-pulse">
+                  {[0, 1, 2].map((i) => (
+                    <div
+                      key={i}
+                      className="rounded-xl border border-zinc-200 p-5 space-y-2"
+                    >
+                      <div className="h-5 w-20 rounded bg-zinc-100" />
+                      <div className="h-3 w-full rounded bg-zinc-100" />
+                      <div className="h-16 w-full rounded bg-zinc-100" />
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Outreach Strategies */}
+              {outreachStrategies && (
+                <div className="space-y-3">
+                  {outreachStrategies.map((s, i) => {
+                    const style = channelStyle[s.channel] ?? {
+                      bg: "bg-zinc-100",
+                      text: "text-zinc-600",
+                    };
+                    return (
+                      <div
+                        key={i}
+                        className="rounded-xl border border-zinc-200 bg-white p-5 space-y-3"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span
+                            className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${style.bg} ${style.text}`}
+                          >
+                            {channelLabels[s.channel] ?? s.channel}
+                          </span>
+                          <span className="text-xs text-zinc-400">
+                            {s.tone}
+                          </span>
+                        </div>
+                        <p className="text-xs leading-relaxed text-zinc-500">
+                          {s.rationale}
+                        </p>
+                        {s.subject && (
+                          <p className="text-sm font-medium text-zinc-800">
+                            Subject: {s.subject}
+                          </p>
+                        )}
+                        <div className="relative rounded-lg bg-zinc-50 p-3">
+                          <p className="pr-16 text-sm leading-relaxed text-zinc-700">
+                            {s.message}
+                          </p>
+                          <button
+                            onClick={() => copyToClipboard(s.message, i)}
+                            className="absolute right-2 top-2 rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-xs text-zinc-500 transition-colors hover:bg-zinc-50 hover:text-zinc-700"
+                          >
+                            {copied === i ? "Copied!" : "Copy"}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Collapsible Details */}
+              <div className="border-t border-zinc-100 pt-4">
+                <button
+                  onClick={() => setDetailsExpanded(!detailsExpanded)}
+                  className="flex w-full items-center justify-between py-2 text-sm text-zinc-400 hover:text-zinc-600 transition-colors"
+                >
+                  <span className="font-medium">View all details</span>
+                  <ChevronDown
+                    className={`h-4 w-4 transition-transform ${detailsExpanded ? "rotate-180" : ""}`}
+                  />
+                </button>
+
+                {detailsExpanded && (
+                  <div className="mt-3 space-y-6">
+                    {detail.interactions.length > 0 && (
+                      <section>
+                        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                          Interactions
+                        </h4>
+                        <div className="space-y-2">
+                          {detail.interactions.map((inter) => (
+                            <div
+                              key={inter.id}
+                              className="rounded-lg border border-zinc-100 bg-zinc-50 p-3"
+                            >
+                              <div className="flex items-center gap-2 text-xs text-zinc-400 mb-1">
+                                {inter.started_at && (
+                                  <span>
+                                    {new Date(
+                                      inter.started_at
+                                    ).toLocaleDateString(undefined, {
+                                      month: "short",
+                                      day: "numeric",
+                                    })}
+                                  </span>
+                                )}
+                                {inter.category && (
+                                  <>
+                                    <span className="text-zinc-300">
+                                      ·
+                                    </span>
+                                    <span>{inter.category}</span>
+                                  </>
+                                )}
+                              </div>
+                              {inter.omi_summary && (
+                                <p className="text-sm text-zinc-600">
+                                  {inter.omi_summary}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    )}
+
+                    {detail.extracted_details.length > 0 && (
+                      <section>
+                        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                          Extracted Details
+                        </h4>
+                        <div className="space-y-3">
+                          {Object.entries(
+                            groupByType(detail.extracted_details)
+                          ).map(([type, items]) => (
+                            <div key={type}>
+                              <p className="mb-1 text-xs text-zinc-400 uppercase">
+                                {type.replace(/_/g, " ")}
+                              </p>
+                              <div className="space-y-1">
+                                {items.map((d) => (
+                                  <div
+                                    key={d.id}
+                                    className="flex items-start justify-between gap-2 rounded-lg bg-zinc-50 px-3 py-2 text-sm text-zinc-600"
+                                  >
+                                    <span>{d.content}</span>
+                                    {d.importance_score != null && (
+                                      <span className="shrink-0 text-xs text-zinc-300">
+                                        {(d.importance_score * 100).toFixed(0)}%
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    )}
+
+                    {detail.insights.length > 0 && (
+                      <section>
+                        <h4 className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                          Insights
+                        </h4>
+                        <div className="space-y-1">
+                          {detail.insights.map((ins) => (
+                            <div
+                              key={ins.id}
+                              className="rounded-lg bg-zinc-50 px-3 py-2 text-sm text-zinc-600"
+                            >
+                              <span className="mr-2 text-xs text-zinc-400">
+                                [{ins.insight_type}]
+                              </span>
+                              {ins.content}
+                            </div>
+                          ))}
+                        </div>
+                      </section>
+                    )}
                   </div>
-                ))}
+                )}
+              </div>
             </div>
-          </div>
-        )}
-      </main>
-    </div>
-  );
-}
+          )}
+        </div>
+      </div>
+    );
+  }
 
-// ---------------------------------------------------------------------------
-// Prep Result Card
-// ---------------------------------------------------------------------------
-
-function PrepCard({ prep, onReset }: { prep: PrepResult; onReset: () => void }) {
+  // =========================================================================
+  // RENDER — Homepage
+  // =========================================================================
   return (
-    <div className="mt-6 space-y-5 rounded-lg border border-zinc-800 bg-zinc-900 p-5">
-      <div className="flex items-start justify-between">
-        <h3 className="text-base font-semibold text-zinc-100">
-          {prep.headline}
-        </h3>
-        <button
-          onClick={onReset}
-          className="text-xs text-zinc-600 hover:text-zinc-400"
-        >
-          Reset
-        </button>
+    <div className="min-h-full bg-white">
+      {/* Disambiguation Banner */}
+      {pendingCount > 0 && (
+        <div className="border-b border-zinc-100 bg-amber-50">
+          <div className="mx-auto max-w-4xl px-4 md:px-6">
+            <button
+              onClick={() => setDisambiguationOpen(!disambiguationOpen)}
+              className="flex w-full items-center justify-between py-2.5 text-sm text-amber-700"
+            >
+              <div className="flex items-center gap-2">
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" />
+                {pendingCount}{" "}
+                {pendingCount === 1 ? "person needs" : "people need"} identifying
+              </div>
+              <ChevronDown
+                className={`h-4 w-4 transition-transform ${disambiguationOpen ? "rotate-180" : ""}`}
+              />
+            </button>
+
+            {disambiguationOpen && (
+              <div className="pb-4 space-y-2">
+                {disambiguationItems
+                  .filter((i) => i.resolution_status === "pending")
+                  .map((item) => (
+                    <div
+                      key={item.id}
+                      className="rounded-lg border border-zinc-200 bg-white p-4"
+                    >
+                      <p className="text-sm font-medium text-zinc-800 mb-1">
+                        Who is &quot;{item.detected_name}&quot;?
+                      </p>
+                      <p className="text-xs text-zinc-400 mb-3 line-clamp-2">
+                        {JSON.stringify(item.extracted_context).slice(0, 150)}
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {item.candidate_people_ids.map((cid) => {
+                          const candidate = peopleLookup.get(cid);
+                          return (
+                            <button
+                              key={cid}
+                              onClick={() =>
+                                resolveDisambiguation(item.id, cid)
+                              }
+                              className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-zinc-600 transition-colors hover:border-blue-400 hover:text-blue-600 min-h-9"
+                            >
+                              {candidate
+                                ? personName(candidate)
+                                : cid.slice(0, 8)}
+                            </button>
+                          );
+                        })}
+                        <button
+                          onClick={() =>
+                            resolveDisambiguation(item.id, undefined, true)
+                          }
+                          className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-xs text-emerald-600 transition-colors hover:border-emerald-400 min-h-9"
+                        >
+                          + Someone new
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Hero Section */}
+      <div className="flex min-h-[70vh] flex-col items-center justify-center px-4">
+        <div className="w-full max-w-[600px] text-center">
+          <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 md:text-4xl">
+            Relationship Engine
+          </h1>
+          <p className="mt-2 text-base text-zinc-400">
+            Remember everyone. Prepare for anything.
+          </p>
+
+          {/* Search */}
+          <div ref={searchRef} className="relative mt-8">
+            <div className="relative">
+              <SearchIcon className="absolute left-3.5 top-1/2 h-5 w-5 -translate-y-1/2 text-zinc-300" />
+              <input
+                type="text"
+                placeholder="Search for a person..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onFocus={() => setSearchFocused(true)}
+                className="w-full rounded-lg border border-zinc-200 bg-white py-3 pl-11 pr-4 text-sm text-zinc-900 placeholder-zinc-400 shadow-sm focus:border-zinc-300 focus:outline-none focus:ring-1 focus:ring-zinc-200 min-h-12"
+              />
+            </div>
+
+            {/* Search Dropdown */}
+            {showDropdown && (
+              <div className="absolute left-0 right-0 z-10 mt-1 max-h-72 overflow-y-auto rounded-lg border border-zinc-200 bg-white shadow-lg">
+                {filtered.length === 0 ? (
+                  <div className="px-4 py-6 text-center text-sm text-zinc-400">
+                    No one found
+                  </div>
+                ) : (
+                  filtered.map((p) => (
+                    <button
+                      key={p.id}
+                      onMouseDown={() => selectPerson(p.id)}
+                      className="flex w-full flex-col px-4 py-3 text-left transition-colors hover:bg-zinc-50 border-b border-zinc-50 last:border-0"
+                    >
+                      <span className="text-sm font-medium text-zinc-800">
+                        {personName(p)}
+                      </span>
+                      {p.preview && (
+                        <span className="mt-0.5 text-xs text-zinc-400 line-clamp-1">
+                          {p.preview}
+                        </span>
+                      )}
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
 
-      <p className="text-sm text-zinc-300 leading-relaxed">
-        {prep.key_context}
-      </p>
-
-      {prep.talking_points.length > 0 && (
-        <div>
-          <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">
-            Talking Points
-          </h4>
-          <div className="space-y-3">
-            {prep.talking_points.map((tp, i) => (
-              <div key={i} className="rounded bg-zinc-800/50 p-3">
-                <p className="text-sm font-medium text-zinc-200">
-                  {tp.topic}
-                </p>
-                <p className="text-sm text-zinc-400 mt-1">
-                  &ldquo;{tp.opener}&rdquo;
-                </p>
-                <p className="text-xs text-zinc-600 mt-1">
-                  {tp.why_it_matters}
-                </p>
+      {/* Use Case Cards */}
+      <div className="border-t border-zinc-100 bg-zinc-50/50 px-4 py-16 md:py-20">
+        <div className="mx-auto max-w-4xl">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3 md:gap-6">
+            {/* Card 1: Meeting Prep */}
+            <div className="rounded-xl border border-zinc-100 bg-white p-6">
+              <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50">
+                <svg
+                  className="h-5 w-5 text-blue-600"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={1.5}
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z"
+                  />
+                </svg>
               </div>
-            ))}
+              <h3 className="text-base font-semibold text-zinc-900">
+                Meeting prep
+              </h3>
+              <p className="mt-2 text-sm leading-relaxed text-zinc-500">
+                Get a personalized briefing before any conversation. Know what to
+                talk about, what to follow up on, and what intel you have from
+                other conversations.
+              </p>
+            </div>
+
+            {/* Card 2: Outreach */}
+            <div className="rounded-xl border border-zinc-100 bg-white p-6">
+              <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-50">
+                <svg
+                  className="h-5 w-5 text-emerald-600"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={1.5}
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5"
+                  />
+                </svg>
+              </div>
+              <h3 className="text-base font-semibold text-zinc-900">
+                Outreach strategies
+              </h3>
+              <p className="mt-2 text-sm leading-relaxed text-zinc-500">
+                Get channel-specific outreach messages — LinkedIn, text, or email
+                — that reference real details from your conversations.
+              </p>
+            </div>
+
+            {/* Card 3: Memory */}
+            <div className="rounded-xl border border-zinc-100 bg-white p-6">
+              <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-violet-50">
+                <svg
+                  className="h-5 w-5 text-violet-600"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={1.5}
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z"
+                  />
+                </svg>
+              </div>
+              <h3 className="text-base font-semibold text-zinc-900">
+                Relationship memory
+              </h3>
+              <p className="mt-2 text-sm leading-relaxed text-zinc-500">
+                Every conversation automatically captured, extracted, and
+                organized. Never forget what someone told you.
+              </p>
+            </div>
           </div>
         </div>
-      )}
-
-      {prep.open_loops.length > 0 && (
-        <div>
-          <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">
-            Open Loops
-          </h4>
-          <div className="space-y-2">
-            {prep.open_loops.map((ol, i) => (
-              <div
-                key={i}
-                className="rounded bg-amber-500/10 border border-amber-500/20 p-3"
-              >
-                <p className="text-sm text-amber-300">{ol.description}</p>
-                <p className="text-xs text-zinc-500 mt-1">
-                  {ol.who_owes_what} &mdash; {ol.suggested_approach}
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {prep.tone_guidance && (
-        <div className="rounded bg-zinc-800/50 p-3">
-          <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1">
-            Tone
-          </h4>
-          <p className="text-sm text-zinc-400">{prep.tone_guidance}</p>
-        </div>
-      )}
-
-      {prep.cross_conversation_intel.length > 0 && (
-        <div>
-          <h4 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">
-            Intel from other conversations
-          </h4>
-          <div className="space-y-2">
-            {prep.cross_conversation_intel.map((ci, i) => (
-              <div key={i} className="rounded bg-blue-500/10 border border-blue-500/20 p-3">
-                <p className="text-sm text-blue-300">{ci.insight}</p>
-                <p className="text-xs text-zinc-500 mt-1">
-                  {ci.source_context}
-                </p>
-                <p className="text-xs text-zinc-600 mt-1">
-                  {ci.suggested_use}
-                </p>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      </div>
     </div>
   );
 }

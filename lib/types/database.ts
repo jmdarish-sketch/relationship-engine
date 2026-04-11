@@ -36,6 +36,7 @@ export interface Interaction {
   geolocation: Record<string, unknown> | null;
   is_relevant: boolean | null;
   relevance_score: number | null;
+  pipeline_status: string | null;
 }
 
 export interface InteractionPerson {

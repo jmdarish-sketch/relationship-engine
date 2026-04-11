@@ -3,7 +3,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 /**
  * GET /api/people?user_id=...
- * Returns all people for a user, ordered by last_seen desc.
+ * Returns all people for a user with a preview detail, ordered by last_seen desc.
  */
 export async function GET(request: NextRequest) {
   const userId = request.nextUrl.searchParams.get("user_id");
@@ -26,5 +26,31 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ people: data });
+  // Fetch the most recent extracted detail for each person for preview
+  const people = data ?? [];
+  if (people.length > 0) {
+    const ids = people.map((p) => p.id);
+    const { data: details } = await supabase
+      .from("extracted_details")
+      .select("person_id, content")
+      .in("person_id", ids)
+      .order("extracted_at", { ascending: false });
+
+    // Build a map of person_id → first (most recent) detail
+    const previewMap = new Map<string, string>();
+    for (const d of details ?? []) {
+      if (!previewMap.has(d.person_id)) {
+        previewMap.set(d.person_id, d.content);
+      }
+    }
+
+    const enriched = people.map((p) => ({
+      ...p,
+      preview: previewMap.get(p.id) ?? null,
+    }));
+
+    return NextResponse.json({ people: enriched });
+  }
+
+  return NextResponse.json({ people });
 }
