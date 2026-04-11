@@ -348,6 +348,12 @@ export default function Dashboard() {
   }, [selectedId, userId]);
 
   // --- Actions ---
+  function logout() {
+    localStorage.removeItem("user_id");
+    localStorage.removeItem("user");
+    router.push("/login");
+  }
+
   function selectPerson(id: string) {
     setSelectedId(id);
     setSearch("");
@@ -443,14 +449,22 @@ export default function Dashboard() {
     return (
       <div className="min-h-full bg-white">
         <div className="mx-auto max-w-2xl px-4 py-6 md:px-6">
-          {/* Back */}
-          <button
-            onClick={() => setSelectedId(null)}
-            className="mb-6 flex items-center gap-1 text-sm text-zinc-400 hover:text-zinc-700 transition-colors"
-          >
-            <ChevronLeft className="h-4 w-4" />
-            Back
-          </button>
+          {/* Nav */}
+          <div className="mb-6 flex items-center justify-between">
+            <button
+              onClick={() => setSelectedId(null)}
+              className="flex items-center gap-1 text-sm text-zinc-400 hover:text-zinc-700 transition-colors"
+            >
+              <ChevronLeft className="h-4 w-4" />
+              Back
+            </button>
+            <button
+              onClick={logout}
+              className="text-sm text-zinc-400 hover:text-zinc-600 transition-colors"
+            >
+              Log out
+            </button>
+          </div>
 
           {detailLoading && (
             <div className="flex items-center justify-center py-24 text-zinc-400">
@@ -930,8 +944,18 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Logout */}
+      <div className="mx-auto max-w-4xl px-4 pt-4 md:px-6 flex justify-end">
+        <button
+          onClick={logout}
+          className="text-sm text-zinc-400 hover:text-zinc-600 transition-colors"
+        >
+          Log out
+        </button>
+      </div>
+
       {/* Hero Section */}
-      <div className="flex min-h-[70vh] flex-col items-center justify-center px-4">
+      <div className="flex min-h-[70vh] flex-col items-center justify-center px-4 -mt-10">
         <div className="w-full max-w-[600px] text-center">
           <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 md:text-4xl">
             Relationship Engine
