@@ -55,7 +55,7 @@ export default function LogConversationPage() {
       if (topics.trim()) details.push({ person_id: personId, interaction_id: iid, category: "personal", detail_key: "topics_discussed", detail_value: topics.trim() });
       for (const d of details) { try { await api.post("/api/extracted-details", d); } catch {} }
       showToast("Conversation saved successfully!");
-      router.push("/");
+      router.push("/dashboard");
     } catch (err) { setError(err instanceof Error ? err.message : "Failed to save"); } finally { setSaving(false); }
   }
 
@@ -84,7 +84,7 @@ export default function LogConversationPage() {
 
   return (
     <div className="relative z-10 min-h-full">
-      <Navbar backLink={{ href: "/", label: "Home" }} />
+      <Navbar backLink={{ href: "/dashboard", label: "Home" }} />
       <main className="animate-page mx-auto max-w-[600px] px-6 sm:px-6 px-4 py-6">
 
         <h1 className="text-[24px] font-bold text-[--color-text-primary]" style={{ letterSpacing: "-0.02em" }}>Log a Conversation</h1>

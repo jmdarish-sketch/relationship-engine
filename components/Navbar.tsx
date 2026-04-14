@@ -24,7 +24,7 @@ export default function Navbar({ backLink, showUser = true }: NavbarProps) {
       >
         <div className="mx-auto flex h-14 max-w-[1080px] items-center justify-between px-6 sm:px-6 px-4">
           {/* Left: logo */}
-          <Link href="/" className="flex items-center gap-2">
+          <Link href={user ? "/dashboard" : "/"} className="flex items-center gap-2">
             <div
               className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg"
               style={{ background: "linear-gradient(135deg, #3B82F6, #2563EB)" }}

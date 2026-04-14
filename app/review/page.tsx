@@ -55,14 +55,14 @@ export default function ReviewPage() {
     const isDone = resolved > 0;
     return (
       <div className="relative z-10 min-h-full">
-        <Navbar backLink={{ href: "/", label: "Home" }} />
+        <Navbar backLink={{ href: "/dashboard", label: "Home" }} />
         <div className="animate-page flex flex-col items-center justify-center px-4 pt-20">
           <div className="flex h-12 w-12 items-center justify-center rounded-full" style={{ background: "linear-gradient(135deg, #3B82F6, #2563EB)" }}>
             <svg className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
           </div>
           <h2 className="mt-5 text-[24px] font-bold text-[--color-text-primary]">{isDone ? "Nice!" : "All caught up!"}</h2>
           <p className="mt-2 text-[14px] text-[--color-text-secondary]">{isDone ? `${resolved} conversation${resolved === 1 ? "" : "s"} matched to contacts.` : "No conversations need review."}</p>
-          <Link href="/" className="mt-6 rounded-full px-8 py-3 text-[15px] font-semibold text-white" style={{ background: "linear-gradient(135deg, #3B82F6, #2563EB)", boxShadow: "var(--shadow-button)" }}>Back to Home</Link>
+          <Link href="/dashboard" className="mt-6 rounded-full px-8 py-3 text-[15px] font-semibold text-white" style={{ background: "linear-gradient(135deg, #3B82F6, #2563EB)", boxShadow: "var(--shadow-button)" }}>Back to Home</Link>
         </div>
       </div>
     );
@@ -74,7 +74,7 @@ export default function ReviewPage() {
 
   return (
     <div className="relative z-10 min-h-full">
-      <Navbar backLink={{ href: "/", label: "Home" }} />
+      <Navbar backLink={{ href: "/dashboard", label: "Home" }} />
       <main className="animate-page mx-auto max-w-[560px] px-6 sm:px-6 px-4 py-6">
 
         <div className="flex items-center justify-between mb-6">

@@ -77,7 +77,7 @@ export default function EditContactsPage() {
 
   return (
     <div className="relative z-10 min-h-full">
-      <Navbar backLink={{ href: "/", label: "Home" }} />
+      <Navbar backLink={{ href: "/dashboard", label: "Home" }} />
       <main className="animate-page mx-auto max-w-[800px] px-6 sm:px-6 px-4 py-6">
 
         <div className="flex items-center gap-3 mb-6">

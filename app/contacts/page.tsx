@@ -55,7 +55,7 @@ export default function ContactsPage() {
 
   return (
     <div className="relative z-10 min-h-full">
-      <Navbar backLink={{ href: "/", label: "Home" }} />
+      <Navbar backLink={{ href: "/dashboard", label: "Home" }} />
       <main className="animate-page mx-auto max-w-[1080px] px-6 sm:px-6 px-4 py-6">
 
         {/* Search */}

@@ -25,7 +25,7 @@ export default function LoginPage() {
           ? await login(email, password)
           : await signup(email, password, name);
       if (!user.onboardingCompleted) router.push("/onboarding");
-      else router.push("/");
+      else router.push("/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {

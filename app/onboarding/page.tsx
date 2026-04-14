@@ -94,7 +94,7 @@ export default function OnboardingPage() {
         current_role: currentRole || null, networking_goals: networkingGoals || null,
         personal_interests: personalInterests, skills,
       });
-      router.push("/");
+      router.push("/dashboard");
     } catch {} finally { setLoading(false); }
   }
 
