@@ -1,98 +1,58 @@
-import { NextRequest, NextResponse } from "next/server";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { getAnthropicClient } from "@/lib/ai/client";
+import { NextRequest } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { requireUserId } from "@/lib/api/auth";
+import { ok, badRequest, unauthorized } from "@/lib/api/response";
+import { callSonnet } from "@/lib/ai/anthropic";
+import { profileSummaryPrompt } from "@/lib/ai/prompts";
 
+/**
+ * POST /api/onboarding
+ * Save onboarding data and generate profile summary.
+ */
 export async function POST(request: NextRequest) {
-  const {
-    user_id,
-    school,
-    graduation_year,
-    major,
-    career_interests,
-    user_current_role,
-    networking_goals,
-    personal_interests,
-    skills,
-  } = await request.json();
-
-  if (!user_id) {
-    return NextResponse.json({ error: "Missing user_id" }, { status: 400 });
+  let userId: string;
+  try {
+    userId = await requireUserId(request);
+  } catch {
+    return unauthorized();
   }
 
-  const supabase = createAdminClient();
+  const body = await request.json();
 
-  // Fetch user name for the profile summary
-  const { data: existingUser } = await supabase
-    .from("users")
-    .select("name")
-    .eq("id", user_id)
-    .single();
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { fullName: true },
+  });
+
+  if (!user) return badRequest("User not found");
 
   // Generate profile summary with Claude
-  const profileInput = [
-    existingUser?.name ? `Name: ${existingUser.name}` : null,
-    user_current_role ? `Current role: ${user_current_role}` : null,
-    school ? `School: ${school}` : null,
-    graduation_year ? `Graduation year: ${graduation_year}` : null,
-    major ? `Major: ${major}` : null,
-    career_interests?.length
-      ? `Career interests: ${career_interests.join(", ")}`
-      : null,
-    networking_goals ? `Networking goals: ${networking_goals}` : null,
-    personal_interests?.length
-      ? `Personal interests: ${personal_interests.join(", ")}`
-      : null,
-    skills?.length ? `Skills: ${skills.join(", ")}` : null,
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  let profile_summary: string | null = null;
-
+  let profileSummary: string | null = null;
   try {
-    const client = getAnthropicClient();
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 256,
-      system:
-        "Summarize this person's professional profile in 2-3 sentences. Include their current situation, career goals, and key interests. This summary will be used as context when generating networking recommendations and outreach messages for them. Write in third person.",
-      messages: [{ role: "user", content: profileInput }],
+    const { system, user: userPrompt } = profileSummaryPrompt({
+      fullName: user.fullName,
+      currentRole: body.current_role,
+      school: body.school,
+      major: body.major,
+      graduationYear: body.graduation_year,
+      careerInterests: body.career_interests,
+      skills: body.skills,
     });
 
-    const text =
-      response.content[0].type === "text" ? response.content[0].text : "";
-    profile_summary = text.trim() || null;
+    const raw = await callSonnet(system, userPrompt);
+    profileSummary = raw.trim() || null;
   } catch (err) {
-    console.error("[onboarding] Failed to generate profile summary:", err);
+    console.error("[onboarding] Profile summary generation failed:", err);
   }
 
-  // Update user record
-  const { data: user, error } = await supabase
-    .from("users")
-    .update({
-      school,
-      graduation_year,
-      major,
-      career_interests: career_interests ?? [],
-      user_current_role,
-      networking_goals,
-      personal_interests: personal_interests ?? [],
-      skills: skills ?? [],
-      onboarding_completed: true,
-      profile_summary,
-    })
-    .eq("id", user_id)
-    .select(
-      "id, email, name, school, graduation_year, major, career_interests, user_current_role, networking_goals, personal_interests, skills, onboarding_completed, profile_summary"
-    )
-    .single();
+  const updated = await prisma.user.update({
+    where: { id: userId },
+    data: {
+      profileSummary,
+      onboardingCompleted: true,
+    },
+    omit: { passwordHash: true },
+  });
 
-  if (error || !user) {
-    return NextResponse.json(
-      { error: "Failed to update profile" },
-      { status: 500 }
-    );
-  }
-
-  return NextResponse.json({ user });
+  return ok(updated);
 }

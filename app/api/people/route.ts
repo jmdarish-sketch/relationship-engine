@@ -1,56 +1,127 @@
-import { NextRequest, NextResponse } from "next/server";
-import { createAdminClient } from "@/lib/supabase/admin";
+import { NextRequest } from "next/server";
+import { z } from "zod";
+import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
+import { requireUserId } from "@/lib/api/auth";
+import { ok, badRequest, unauthorized } from "@/lib/api/response";
+import { buildFingerprint, buildDisplayName } from "@/lib/api/fingerprint";
 
-/**
- * GET /api/people?user_id=...
- * Returns all people for a user with a preview detail, ordered by last_seen desc.
- */
+// GET /api/people
 export async function GET(request: NextRequest) {
-  const userId = request.nextUrl.searchParams.get("user_id");
-  if (!userId) {
-    return NextResponse.json({ error: "Missing user_id" }, { status: 400 });
+  let userId: string;
+  try {
+    userId = await requireUserId(request);
+  } catch {
+    return unauthorized();
   }
 
-  const supabase = createAdminClient();
+  const params = request.nextUrl.searchParams;
+  const search = params.get("search") ?? undefined;
+  const sort = params.get("sort") ?? "recent";
+  const limit = Math.min(parseInt(params.get("limit") ?? "50"), 100);
+  const offset = parseInt(params.get("offset") ?? "0");
 
-  const { data, error } = await supabase
-    .from("people")
-    .select(
-      "id, first_name, last_name, display_label, interaction_count, last_seen, relationship_strength, evolving_profile"
-    )
-    .eq("user_id", userId)
-    .eq("is_merged", false)
-    .order("last_seen", { ascending: false });
+  const where = {
+    userId,
+    ...(search
+      ? {
+          OR: [
+            { displayName: { contains: search, mode: "insensitive" as const } },
+            { firstName: { contains: search, mode: "insensitive" as const } },
+            { lastName: { contains: search, mode: "insensitive" as const } },
+            { employer: { contains: search, mode: "insensitive" as const } },
+          ],
+        }
+      : {}),
+  };
 
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  const orderBy =
+    sort === "name"
+      ? { displayName: "asc" as const }
+      : { updatedAt: "desc" as const };
+
+  const [people, total] = await Promise.all([
+    prisma.person.findMany({
+      where,
+      orderBy,
+      take: limit,
+      skip: offset,
+      include: {
+        _count: { select: { interactionPeople: true } },
+      },
+    }),
+    prisma.person.count({ where }),
+  ]);
+
+  return ok(people, { total, limit, offset });
+}
+
+// POST /api/people
+const createSchema = z.object({
+  display_name: z.string().min(1).optional(),
+  first_name: z.string().optional(),
+  last_name: z.string().optional(),
+  employer: z.string().optional(),
+  user_current_role: z.string().optional(),
+  school: z.string().optional(),
+  email: z.string().email().optional(),
+  phone: z.string().optional(),
+  linkedin_url: z.string().url().optional(),
+  notes: z.string().optional(),
+});
+
+export async function POST(request: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId(request);
+  } catch {
+    return unauthorized();
   }
 
-  // Fetch the most recent extracted detail for each person for preview
-  const people = data ?? [];
-  if (people.length > 0) {
-    const ids = people.map((p) => p.id);
-    const { data: details } = await supabase
-      .from("extracted_details")
-      .select("person_id, content")
-      .in("person_id", ids)
-      .order("extracted_at", { ascending: false });
-
-    // Build a map of person_id → first (most recent) detail
-    const previewMap = new Map<string, string>();
-    for (const d of details ?? []) {
-      if (!previewMap.has(d.person_id)) {
-        previewMap.set(d.person_id, d.content);
-      }
-    }
-
-    const enriched = people.map((p) => ({
-      ...p,
-      preview: previewMap.get(p.id) ?? null,
-    }));
-
-    return NextResponse.json({ people: enriched });
+  const body = await request.json();
+  const parsed = createSchema.safeParse(body);
+  if (!parsed.success) {
+    return badRequest("Validation failed", parsed.error.flatten());
   }
 
-  return NextResponse.json({ people });
+  const d = parsed.data;
+  const displayName =
+    d.display_name ??
+    buildDisplayName({
+      firstName: d.first_name,
+      lastName: d.last_name,
+      employer: d.employer,
+      school: d.school,
+    });
+
+  const fingerprint = buildFingerprint({
+    firstName: d.first_name,
+    lastName: d.last_name,
+    employer: d.employer,
+    userCurrentRole: d.user_current_role,
+    school: d.school,
+    email: d.email,
+  });
+
+  const person = await prisma.person.create({
+    data: {
+      userId,
+      displayName,
+      firstName: d.first_name ?? null,
+      lastName: d.last_name ?? null,
+      employer: d.employer ?? null,
+      userCurrentRole: d.user_current_role ?? null,
+      school: d.school ?? null,
+      email: d.email ?? null,
+      phone: d.phone ?? null,
+      linkedinUrl: d.linkedin_url ?? null,
+      notes: d.notes ?? null,
+      fingerprint: Object.keys(fingerprint).length > 0 ? fingerprint : Prisma.DbNull,
+    },
+    include: {
+      _count: { select: { interactionPeople: true } },
+    },
+  });
+
+  return ok(person);
 }

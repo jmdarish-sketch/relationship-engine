@@ -1,2 +1,3 @@
-export { processInteraction } from "./process-interaction";
-export { resolveSpeakers, regenerateDisplayLabel, buildDisplayLabel } from "./speaker-resolver";
+export { processInteraction } from "./processor";
+export { resolveSpeakers } from "./speaker-resolver";
+export { enqueueProcessing, processAllPending } from "./queue";

@@ -1,20 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { formatTranscript } from "@/lib/omi/transcript";
-import { processInteraction } from "@/lib/pipeline";
+import { prisma } from "@/lib/prisma";
+import { enqueueProcessing } from "@/lib/pipeline/queue";
 
 /**
  * POST /api/webhook/omi
  *
- * Receives Omi's memory creation webhook. Validates, deduplicates,
- * stores the interaction, and runs the processing pipeline.
- *
- * Omi sends: { id, created_at, started_at, finished_at,
- *   transcript_segments, structured, geolocation, discarded }
+ * Public endpoint — Omi sends conversation transcripts here.
+ * Authenticated via ?uid= query param (user's id) or omi_api_key.
+ * Creates an interaction and triggers async processing.
  */
 export async function POST(request: NextRequest) {
-  const supabase = createAdminClient();
-
   let body: Record<string, unknown>;
   try {
     body = await request.json();
@@ -22,125 +17,207 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  // Omi conversation ID
-  const omiConversationId = body.id as string | undefined;
-  if (!omiConversationId) {
+  // --- Authenticate ---
+  const uid = request.nextUrl.searchParams.get("uid");
+  const apiKey = request.headers
+    .get("authorization")
+    ?.replace("Bearer ", "");
+  const webhookSecret = process.env.OMI_WEBHOOK_SECRET;
+
+  let userId: string | null = null;
+
+  if (uid) {
+    // Look up user by ID directly
+    const user = await prisma.user.findUnique({
+      where: { id: uid },
+      select: { id: true },
+    });
+    if (user) userId = user.id;
+  }
+
+  if (!userId && apiKey) {
+    // Look up user by API key
+    const user = await prisma.user.findFirst({
+      where: { omiApiKey: apiKey },
+      select: { id: true },
+    });
+    if (user) userId = user.id;
+  }
+
+  if (!userId && webhookSecret && apiKey === webhookSecret) {
+    // Fallback: global webhook secret (for testing)
+    // Requires uid param to identify the user
     return NextResponse.json(
-      { error: "Missing conversation id" },
+      { error: "uid query param required with webhook secret" },
       { status: 400 }
     );
   }
 
-  // Authenticate via uid query param (Omi sends the user's id directly)
-  // or fall back to Bearer token matched against omi_api_key
-  const uid = request.nextUrl.searchParams.get("uid");
-  const bearerToken = request.headers.get("authorization")?.replace("Bearer ", "");
-
-  if (!uid && !bearerToken) {
+  if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { data: user, error: userError } = uid
-    ? await supabase.from("users").select("id").eq("id", uid).single()
-    : await supabase.from("users").select("id").eq("omi_api_key", bearerToken!).single();
+  // --- Parse Omi payload ---
+  const sessionId = (body.session_id ?? body.id) as string | undefined;
+  const segments = body.segments as
+    | { text: string; speaker: string; start: number; end: number }[]
+    | undefined;
 
-  if (userError || !user) {
-    return NextResponse.json({ error: "Invalid API key" }, { status: 401 });
-  }
-
-  // Check for duplicates
-  const { data: existing } = await supabase
-    .from("interactions")
-    .select("id")
-    .eq("omi_conversation_id", omiConversationId)
-    .single();
-
-  if (existing) {
-    return NextResponse.json({
-      success: true,
-      interaction_id: existing.id,
-      status: "duplicate",
-    });
+  if (!sessionId) {
+    return NextResponse.json(
+      { error: "Missing session_id" },
+      { status: 400 }
+    );
   }
 
   // Skip discarded conversations
   if (body.discarded === true) {
+    return NextResponse.json({ status: "discarded" });
+  }
+
+  // Check for duplicates by omi_session_id
+  const existing = await prisma.interaction.findFirst({
+    where: { omiSessionId: sessionId, userId },
+    select: { id: true },
+  });
+
+  if (existing) {
     return NextResponse.json({
-      success: true,
-      status: "discarded",
+      status: "duplicate",
+      interaction_id: existing.id,
     });
   }
 
-  // Format transcript from segments
-  const segments = body.transcript_segments as
-    | { text: string; speaker: string; speaker_id: number; is_user: boolean; start: number; end: number }[]
-    | undefined;
-  const transcript = segments ? formatTranscript(segments) : "";
+  // Build transcript from segments
+  let rawTranscript = "";
+  if (segments && segments.length > 0) {
+    rawTranscript = formatTranscript(segments);
+  } else if (typeof body.transcript === "string") {
+    rawTranscript = body.transcript;
+  }
 
-  // Build summary from structured data
+  // Also handle Omi's transcript_segments format
+  const transcriptSegments = body.transcript_segments as
+    | {
+        text: string;
+        speaker: string;
+        speaker_id: number;
+        is_user: boolean;
+        start: number;
+        end: number;
+      }[]
+    | undefined;
+
+  if (!rawTranscript && transcriptSegments?.length) {
+    rawTranscript = formatOmiTranscriptSegments(transcriptSegments);
+  }
+
+  // Compute duration from segments
+  let durationSeconds: number | null = null;
+  const allSegments = segments ?? transcriptSegments;
+  if (allSegments && allSegments.length > 0) {
+    const maxEnd = Math.max(...allSegments.map((s) => s.end));
+    durationSeconds = Math.round(maxEnd);
+  }
+
+  // Extract structured summary if present
   const structured = body.structured as
-    | { title?: string; overview?: string; category?: string }
+    | { overview?: string; category?: string }
     | undefined;
 
-  // Store the interaction
-  const { data: interaction, error: insertError } = await supabase
-    .from("interactions")
-    .insert({
-      user_id: user.id,
-      omi_conversation_id: omiConversationId,
-      raw_transcript: transcript,
-      omi_summary: structured?.overview ?? null,
-      category: structured?.category ?? null,
-      geolocation: body.geolocation ?? null,
-      started_at: body.started_at ?? null,
-      finished_at: body.finished_at ?? null,
-    })
-    .select("id")
-    .single();
+  // Parse interaction date
+  const interactionDate = body.started_at
+    ? new Date(body.started_at as string)
+    : new Date();
 
-  if (insertError || !interaction) {
-    console.error("Failed to store interaction:", insertError);
-    return NextResponse.json(
-      { error: "Failed to store interaction" },
-      { status: 500 }
-    );
+  // Create the interaction
+  const interaction = await prisma.interaction.create({
+    data: {
+      userId,
+      source: "omi",
+      rawTranscript: rawTranscript || null,
+      summary: structured?.overview ?? null,
+      interactionDate,
+      durationSeconds,
+      omiSessionId: sessionId,
+      processingStatus: rawTranscript ? "pending" : "completed",
+    },
+  });
+
+  // Trigger async processing if there's a transcript
+  if (rawTranscript) {
+    enqueueProcessing(interaction.id);
   }
 
-  // If no transcript, skip processing
-  if (!transcript) {
-    await supabase
-      .from("interactions")
-      .update({ is_relevant: false, relevance_score: 0 })
-      .eq("id", interaction.id);
+  return NextResponse.json({
+    status: "accepted",
+    interaction_id: interaction.id,
+  });
+}
 
-    return NextResponse.json({
-      success: true,
-      interaction_id: interaction.id,
-      status: "no_transcript",
-    });
+// ---------------------------------------------------------------------------
+// Transcript formatting
+// ---------------------------------------------------------------------------
+
+function formatTranscript(
+  segments: { text: string; speaker: string; start: number; end: number }[]
+): string {
+  const lines: string[] = [];
+  let currentSpeaker: string | null = null;
+  let currentTexts: string[] = [];
+
+  for (const seg of segments) {
+    if (seg.speaker !== currentSpeaker) {
+      if (currentSpeaker && currentTexts.length > 0) {
+        lines.push(`${currentSpeaker}: ${currentTexts.join(" ")}`);
+      }
+      currentSpeaker = seg.speaker;
+      currentTexts = [seg.text.trim()];
+    } else {
+      currentTexts.push(seg.text.trim());
+    }
   }
 
-  // Run the processing pipeline
-  try {
-    const result = await processInteraction(
-      supabase,
-      interaction.id,
-      user.id,
-      transcript
-    );
-
-    return NextResponse.json({
-      success: true,
-      ...result,
-    });
-  } catch (err) {
-    console.error("Pipeline error:", err);
-    // Still return success since the interaction is stored
-    return NextResponse.json({
-      success: true,
-      interaction_id: interaction.id,
-      status: "pipeline_error",
-      error: err instanceof Error ? err.message : "Unknown error",
-    });
+  if (currentSpeaker && currentTexts.length > 0) {
+    lines.push(`${currentSpeaker}: ${currentTexts.join(" ")}`);
   }
+
+  return lines.join("\n");
+}
+
+function formatOmiTranscriptSegments(
+  segments: {
+    text: string;
+    speaker: string;
+    speaker_id: number;
+    is_user: boolean;
+    start: number;
+    end: number;
+  }[]
+): string {
+  const lines: string[] = [];
+  let currentLabel: string | null = null;
+  let currentTexts: string[] = [];
+
+  for (const seg of segments) {
+    const label = seg.is_user
+      ? "USER"
+      : `SPEAKER_${String(seg.speaker_id).padStart(2, "0")}`;
+
+    if (label !== currentLabel) {
+      if (currentLabel && currentTexts.length > 0) {
+        lines.push(`${currentLabel}: ${currentTexts.join(" ")}`);
+      }
+      currentLabel = label;
+      currentTexts = [seg.text.trim()];
+    } else {
+      currentTexts.push(seg.text.trim());
+    }
+  }
+
+  if (currentLabel && currentTexts.length > 0) {
+    lines.push(`${currentLabel}: ${currentTexts.join(" ")}`);
+  }
+
+  return lines.join("\n");
 }

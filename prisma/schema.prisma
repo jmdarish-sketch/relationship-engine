@@ -1,0 +1,205 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Users
+// ---------------------------------------------------------------------------
+
+model User {
+  id                   String    @id @default(uuid()) @db.Uuid
+  email                String    @unique
+  passwordHash         String    @map("password_hash")
+  fullName             String    @map("full_name")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  profileSummary       String?   @map("profile_summary") @db.Text
+  onboardingCompleted  Boolean   @default(false) @map("onboarding_completed")
+  omiWebhookUrl        String?   @map("omi_webhook_url")
+  omiApiKey            String?   @map("omi_api_key")
+
+  people               Person[]
+  interactions         Interaction[]
+  insights             Insight[]
+  disambiguationQueue  DisambiguationQueue[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// People (contacts identified from conversations)
+// ---------------------------------------------------------------------------
+
+model Person {
+  id              String    @id @default(uuid()) @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  displayName     String    @map("display_name")
+  firstName       String?   @map("first_name")
+  lastName        String?   @map("last_name")
+  employer        String?
+  userCurrentRole String?   @map("user_current_role")
+  school          String?
+  email           String?
+  phone           String?
+  linkedinUrl     String?   @map("linkedin_url")
+  notes           String?   @db.Text
+  fingerprint     Json?
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  interactionPeople   InteractionPerson[]
+  extractedDetails    ExtractedDetail[]
+  identitySignals     IdentitySignal[]
+  insights            Insight[]
+  disambiguationResolutions DisambiguationQueue[] @relation("ResolvedPerson")
+
+  @@index([userId])
+  @@index([email])
+  @@map("people")
+}
+
+// ---------------------------------------------------------------------------
+// Interactions (conversation records)
+// ---------------------------------------------------------------------------
+
+model Interaction {
+  id                  String    @id @default(uuid()) @db.Uuid
+  userId              String    @map("user_id") @db.Uuid
+  source              String    // "omi" | "manual" | "import"
+  rawTranscript       String?   @map("raw_transcript") @db.Text
+  processedTranscript String?   @map("processed_transcript") @db.Text
+  summary             String?   @db.Text
+  interactionDate     DateTime  @map("interaction_date")
+  durationSeconds     Int?      @map("duration_seconds")
+  location            String?
+  omiSessionId        String?   @map("omi_session_id")
+  processingStatus    String    @default("pending") @map("processing_status")
+  createdAt           DateTime  @default(now()) @map("created_at")
+
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  interactionPeople   InteractionPerson[]
+  extractedDetails    ExtractedDetail[]
+  identitySignals     IdentitySignal[]
+  disambiguationQueue DisambiguationQueue[]
+
+  @@index([userId])
+  @@index([omiSessionId])
+  @@index([processingStatus])
+  @@map("interactions")
+}
+
+// ---------------------------------------------------------------------------
+// Interaction ↔ People join table
+// ---------------------------------------------------------------------------
+
+model InteractionPerson {
+  id              String  @id @default(uuid()) @db.Uuid
+  interactionId   String  @map("interaction_id") @db.Uuid
+  personId        String  @map("person_id") @db.Uuid
+  confidenceScore Float?  @map("confidence_score")
+  speakerLabel    String? @map("speaker_label")
+
+  interaction Interaction @relation(fields: [interactionId], references: [id], onDelete: Cascade)
+  person      Person      @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@index([interactionId])
+  @@index([personId])
+  @@map("interaction_people")
+}
+
+// ---------------------------------------------------------------------------
+// Extracted details from conversations
+// ---------------------------------------------------------------------------
+
+model ExtractedDetail {
+  id            String   @id @default(uuid()) @db.Uuid
+  interactionId String   @map("interaction_id") @db.Uuid
+  personId      String?  @map("person_id") @db.Uuid
+  category      String   // "career", "education", "personal", "preference", "action_item"
+  detailKey     String   @map("detail_key")
+  detailValue   String   @map("detail_value") @db.Text
+  confidence    Float?
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  interaction Interaction @relation(fields: [interactionId], references: [id], onDelete: Cascade)
+  person      Person?     @relation(fields: [personId], references: [id], onDelete: SetNull)
+
+  @@index([interactionId])
+  @@index([personId])
+  @@index([category])
+  @@map("extracted_details")
+}
+
+// ---------------------------------------------------------------------------
+// Identity signals for speaker resolution
+// ---------------------------------------------------------------------------
+
+model IdentitySignal {
+  id            String   @id @default(uuid()) @db.Uuid
+  personId      String   @map("person_id") @db.Uuid
+  interactionId String   @map("interaction_id") @db.Uuid
+  signalType    String   @map("signal_type")
+  signalValue   String   @map("signal_value")
+  confidence    Float
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  person      Person      @relation(fields: [personId], references: [id], onDelete: Cascade)
+  interaction Interaction @relation(fields: [interactionId], references: [id], onDelete: Cascade)
+
+  @@index([personId])
+  @@index([interactionId])
+  @@map("identity_signals")
+}
+
+// ---------------------------------------------------------------------------
+// AI-generated insights
+// ---------------------------------------------------------------------------
+
+model Insight {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  personId    String?   @map("person_id") @db.Uuid
+  insightType String    @map("insight_type")
+  content     String    @db.Text
+  metadata    Json?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  expiresAt   DateTime? @map("expires_at")
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  person Person? @relation(fields: [personId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([personId])
+  @@index([insightType])
+  @@map("insights")
+}
+
+// ---------------------------------------------------------------------------
+// Disambiguation queue for ambiguous speaker matches
+// ---------------------------------------------------------------------------
+
+model DisambiguationQueue {
+  id                       String    @id @default(uuid()) @db.Uuid
+  userId                   String    @map("user_id") @db.Uuid
+  interactionId            String    @map("interaction_id") @db.Uuid
+  speakerLabel             String    @map("speaker_label")
+  candidatePersonIds       String[]  @map("candidate_person_ids") @db.Uuid
+  identitySignalsSnapshot  Json      @map("identity_signals_snapshot")
+  status                   String    @default("pending")
+  resolvedPersonId         String?   @map("resolved_person_id") @db.Uuid
+  resolvedAt               DateTime? @map("resolved_at")
+  createdAt                DateTime  @default(now()) @map("created_at")
+
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  interaction     Interaction  @relation(fields: [interactionId], references: [id], onDelete: Cascade)
+  resolvedPerson  Person?      @relation("ResolvedPerson", fields: [resolvedPersonId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([interactionId])
+  @@index([status])
+  @@map("disambiguation_queue")
+}

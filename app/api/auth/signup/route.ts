@@ -1,25 +1,42 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { hashPassword } from "@/lib/auth/hash";
+import { prisma } from "@/lib/prisma";
+import {
+  hashPassword,
+  generateAccessToken,
+  generateRefreshToken,
+} from "@/lib/auth";
+import { setAuthCookies } from "@/lib/auth-helpers";
 
 export async function POST(request: NextRequest) {
-  const { email, password, name } = await request.json();
+  const { email, password, full_name } = await request.json();
 
-  if (!email || !password) {
+  if (!email || !password || !full_name) {
     return NextResponse.json(
-      { error: "Email and password are required" },
+      { error: "Email, password, and full name are required" },
       { status: 400 }
     );
   }
 
-  const supabase = createAdminClient();
+  // Validate email format
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return NextResponse.json(
+      { error: "Invalid email format" },
+      { status: 400 }
+    );
+  }
+
+  // Validate password strength
+  if (password.length < 8) {
+    return NextResponse.json(
+      { error: "Password must be at least 8 characters" },
+      { status: 400 }
+    );
+  }
 
   // Check if email already exists
-  const { data: existing } = await supabase
-    .from("users")
-    .select("id")
-    .eq("email", email.toLowerCase().trim())
-    .single();
+  const existing = await prisma.user.findUnique({
+    where: { email: email.toLowerCase().trim() },
+  });
 
   if (existing) {
     return NextResponse.json(
@@ -28,29 +45,29 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const password_hash = await hashPassword(password);
+  const passwordHash = await hashPassword(password);
 
-  const { data: user, error } = await supabase
-    .from("users")
-    .insert({
+  const user = await prisma.user.create({
+    data: {
       email: email.toLowerCase().trim(),
-      name: name?.trim() || null,
-      password_hash,
-    })
-    .select("id, email, name, onboarding_completed")
-    .single();
-
-  if (error || !user) {
-    return NextResponse.json(
-      { error: "Failed to create account" },
-      { status: 500 }
-    );
-  }
-
-  return NextResponse.json({
-    user_id: user.id,
-    email: user.email,
-    name: user.name,
-    onboarding_completed: user.onboarding_completed,
+      passwordHash,
+      fullName: full_name.trim(),
+    },
   });
+
+  const [accessToken, refreshToken] = await Promise.all([
+    generateAccessToken(user.id),
+    generateRefreshToken(user.id),
+  ]);
+
+  const response = NextResponse.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      fullName: user.fullName,
+      onboardingCompleted: user.onboardingCompleted,
+    },
+  });
+
+  return setAuthCookies(response, accessToken, refreshToken);
 }
