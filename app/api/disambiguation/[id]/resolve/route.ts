@@ -1,7 +1,6 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { Prisma } from "@prisma/client";
 import { requireUserId } from "@/lib/api/auth";
 import { ok, badRequest, notFound, unauthorized } from "@/lib/api/response";
 import { buildFingerprint, buildDisplayName } from "@/lib/api/fingerprint";
@@ -65,14 +64,12 @@ export async function POST(
   let resolvedPersonId: string;
 
   if (action.action === "resolve") {
-    // Verify person belongs to user
     const person = await prisma.person.findFirst({
       where: { id: action.resolved_person_id, userId },
     });
     if (!person) return notFound("Resolved person not found");
     resolvedPersonId = person.id;
   } else {
-    // create_new
     const pd = action.person_data;
     const fingerprint = buildFingerprint({
       firstName: pd.first_name,
@@ -80,7 +77,6 @@ export async function POST(
       employer: pd.employer,
       school: pd.school,
     });
-
     const displayName =
       pd.display_name ??
       buildDisplayName({
@@ -98,15 +94,12 @@ export async function POST(
         lastName: pd.last_name ?? null,
         employer: pd.employer ?? null,
         school: pd.school ?? null,
-        fingerprint: Object.keys(fingerprint).length > 0 ? fingerprint : Prisma.DbNull,
+        fingerprint: Object.keys(fingerprint).length > 0 ? fingerprint : undefined,
       },
     });
     resolvedPersonId = newPerson.id;
   }
 
-  // Link the speaker to the resolved person
-  // Update any tentative interaction_people records for this interaction
-  // that match one of the candidate person IDs
   if (item.candidatePersonIds.length > 0) {
     await prisma.interactionPerson.updateMany({
       where: {
@@ -116,7 +109,6 @@ export async function POST(
       data: { personId: resolvedPersonId, confidenceScore: 1.0 },
     });
   } else {
-    // No existing link — create one
     await prisma.interactionPerson.create({
       data: {
         interactionId: item.interactionId,
@@ -127,7 +119,6 @@ export async function POST(
     });
   }
 
-  // Mark queue item resolved
   await prisma.disambiguationQueue.update({
     where: { id },
     data: {
