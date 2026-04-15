@@ -7,6 +7,7 @@ import { callSonnet } from "@/lib/ai/anthropic";
 import { profileSummaryPrompt } from "@/lib/ai/prompts";
 
 const schema = z.object({
+  full_name: z.string().min(1).optional(),
   school: z.string().nullable().optional(),
   graduation_year: z.number().int().nullable().optional(),
   major: z.string().nullable().optional(),
@@ -20,6 +21,7 @@ const schema = z.object({
 /**
  * POST /api/profile
  * Update the user's onboarding profile fields and regenerate profile_summary.
+ * Writes both the structured profile_data JSON and a freshly regenerated summary.
  */
 export async function POST(request: NextRequest) {
   let userId: string;
@@ -35,13 +37,15 @@ export async function POST(request: NextRequest) {
     return badRequest("Validation failed", parsed.error.flatten());
   }
 
-  const user = await prisma.user.findUnique({
+  const existing = await prisma.user.findUnique({
     where: { id: userId },
     select: { fullName: true },
   });
-  if (!user) return badRequest("User not found");
+  if (!existing) return badRequest("User not found");
 
   const d = parsed.data;
+  const fullName = d.full_name ?? existing.fullName;
+
   const profileData = {
     school: d.school ?? null,
     graduation_year: d.graduation_year ?? null,
@@ -56,7 +60,7 @@ export async function POST(request: NextRequest) {
   let profileSummary: string | null = null;
   try {
     const { system, user: userPrompt } = profileSummaryPrompt({
-      fullName: user.fullName,
+      fullName,
       currentRole: profileData.current_role,
       school: profileData.school,
       major: profileData.major,
@@ -74,7 +78,11 @@ export async function POST(request: NextRequest) {
 
   const updated = await prisma.user.update({
     where: { id: userId },
-    data: { profileData, profileSummary },
+    data: {
+      ...(d.full_name && { fullName: d.full_name }),
+      profileData,
+      profileSummary,
+    },
     omit: { passwordHash: true },
   });
 

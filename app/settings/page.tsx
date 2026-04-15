@@ -28,18 +28,22 @@ interface ProfileData {
   skills: string[];
 }
 
-interface UserResponse {
+interface UserProfileResponse {
   data: {
     id: string;
     email: string;
-    fullName: string;
-    omiApiKey: string | null;
-    profileData: ProfileData | null;
+    full_name: string;
+    profile_data: ProfileData | null;
+    profile_summary: string | null;
+    onboarding_completed: boolean;
+    omi_api_key: string | null;
+    omi_api_key_masked: string | null;
+    omi_api_key_has_value: boolean;
   };
 }
 
 // ---------------------------------------------------------------------------
-// Tag Input
+// TagInput
 // ---------------------------------------------------------------------------
 
 function TagInput({ tags, setTags, suggestions, placeholder }: {
@@ -81,10 +85,6 @@ function TagInput({ tags, setTags, suggestions, placeholder }: {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Field helpers
-// ---------------------------------------------------------------------------
-
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
@@ -120,6 +120,11 @@ export default function SettingsPage() {
   const [loaded, setLoaded] = useState(false);
   const [toast, setToast] = useState<{ msg: string; kind: "success" | "error" } | null>(null);
 
+  // User identity
+  const [fullName, setFullName] = useState("");
+  const [email, setEmail] = useState("");
+  const [userId, setUserId] = useState("");
+
   // Profile fields
   const [school, setSchool] = useState("");
   const [gradYear, setGradYear] = useState("");
@@ -131,8 +136,13 @@ export default function SettingsPage() {
   const [skills, setSkills] = useState<string[]>([]);
   const [savingProfile, setSavingProfile] = useState(false);
 
+  // Fallback state (profile_data null but profile_summary exists)
+  const [fallbackSummary, setFallbackSummary] = useState<string | null>(null);
+
   // Omi
   const [omiKey, setOmiKey] = useState("");
+  const [omiKeyMasked, setOmiKeyMasked] = useState("");
+  const [omiKeyDirty, setOmiKeyDirty] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [savingKey, setSavingKey] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -143,24 +153,36 @@ export default function SettingsPage() {
   const [confirmPw, setConfirmPw] = useState("");
   const [changingPw, setChangingPw] = useState(false);
 
-  const webhookUrl = user ? `https://relationship-engine-ten.vercel.app/api/webhook/omi?uid=${user.id}` : "";
+  const webhookUrl = userId ? `https://relationship-engine-ten.vercel.app/api/webhook/omi?uid=${userId}` : "";
 
   useEffect(() => {
     if (!user) return;
     (async () => {
       try {
-        const res = await api.get<UserResponse>("/api/user/profile");
+        const res = await api.get<UserProfileResponse>("/api/user/profile");
         const u = res.data;
-        const pd = u.profileData ?? null;
-        setSchool(pd?.school ?? "");
-        setGradYear(pd?.graduation_year ? String(pd.graduation_year) : "");
-        setMajor(pd?.major ?? "");
-        setCurrentRole(pd?.current_role ?? "");
-        setCareerInterests(pd?.career_interests ?? []);
-        setNetworkingGoals(pd?.networking_goals ?? "");
-        setPersonalInterests(pd?.personal_interests ?? []);
-        setSkills(pd?.skills ?? []);
-        setOmiKey(u.omiApiKey ?? "");
+        setUserId(u.id);
+        setEmail(u.email);
+        setFullName(u.full_name ?? "");
+
+        const pd = u.profile_data;
+        if (pd) {
+          setSchool(pd.school ?? "");
+          setGradYear(pd.graduation_year ? String(pd.graduation_year) : "");
+          setMajor(pd.major ?? "");
+          setCurrentRole(pd.current_role ?? "");
+          setCareerInterests(pd.career_interests ?? []);
+          setNetworkingGoals(pd.networking_goals ?? "");
+          setPersonalInterests(pd.personal_interests ?? []);
+          setSkills(pd.skills ?? []);
+          setFallbackSummary(null);
+        } else if (u.profile_summary) {
+          setFallbackSummary(u.profile_summary);
+        }
+
+        setOmiKeyMasked(u.omi_api_key_masked ?? "");
+        setOmiKey(""); // not dirty
+        setOmiKeyDirty(false);
       } catch {} finally {
         setLoaded(true);
       }
@@ -176,6 +198,7 @@ export default function SettingsPage() {
     setSavingProfile(true);
     try {
       await api.post("/api/profile", {
+        full_name: fullName || undefined,
         school: school || null,
         graduation_year: gradYear ? parseInt(gradYear) : null,
         major: major || null,
@@ -185,6 +208,7 @@ export default function SettingsPage() {
         personal_interests: personalInterests,
         skills,
       });
+      setFallbackSummary(null);
       showToast("Profile saved");
     } catch (e) {
       showToast(e instanceof Error ? e.message : "Failed to save", "error");
@@ -196,7 +220,19 @@ export default function SettingsPage() {
   async function saveOmiKey() {
     setSavingKey(true);
     try {
-      await api.put("/api/user/profile", { omi_api_key: omiKey || null });
+      const payload = omiKeyDirty ? (omiKey || null) : undefined;
+      if (payload === undefined) {
+        showToast("No changes");
+        setSavingKey(false);
+        return;
+      }
+      await api.put("/api/user/profile", { omi_api_key: payload });
+      // Refetch to get the new masked value
+      const res = await api.get<UserProfileResponse>("/api/user/profile");
+      setOmiKeyMasked(res.data.omi_api_key_masked ?? "");
+      setOmiKey("");
+      setOmiKeyDirty(false);
+      setShowKey(false);
       showToast("Omi key saved");
     } catch (e) {
       showToast(e instanceof Error ? e.message : "Failed to save", "error");
@@ -245,14 +281,14 @@ export default function SettingsPage() {
     );
   }
 
-  const maskedKey = omiKey
+  // What to show in Omi key input
+  const omiDisplay = omiKeyDirty
     ? (showKey ? omiKey : "•".repeat(Math.min(omiKey.length, 24)))
-    : "";
+    : (showKey ? "" : omiKeyMasked);
 
   return (
     <div className="relative z-10 min-h-screen bg-white">
       <main className="animate-page mx-auto max-w-[640px] px-6 pt-10 pb-16">
-        {/* Back arrow */}
         <button
           onClick={() => router.push("/dashboard")}
           className="mb-6 inline-flex items-center gap-1.5 text-[13px] text-[--color-text-tertiary] transition-colors hover:text-[--color-text-secondary]"
@@ -274,10 +310,28 @@ export default function SettingsPage() {
             Profile
           </h2>
           <p className="mt-1 mb-5 text-[13px] text-[--color-text-tertiary]">
-            Updating these regenerates your profile summary used by the AI.
+            Saving regenerates your profile summary used by the AI.
           </p>
 
+          {fallbackSummary && (
+            <div className="mb-6 rounded-xl border border-[--color-border] bg-[#F8FAFC] p-4">
+              <p className="text-[11px] font-semibold uppercase text-[--color-text-tertiary]" style={{ letterSpacing: "0.05em" }}>
+                Current profile summary
+              </p>
+              <p className="mt-2 text-[13px] text-[--color-text-secondary]" style={{ lineHeight: 1.55 }}>
+                {fallbackSummary}
+              </p>
+              <p className="mt-3 text-[12px] text-[--color-text-tertiary]">
+                Re-enter your profile details below to enable editing.
+              </p>
+            </div>
+          )}
+
           <div className="space-y-4">
+            <Field label="Full name"><TextInput value={fullName} onChange={(e) => setFullName(e.target.value)} /></Field>
+            <Field label="Email">
+              <input type="email" value={email} readOnly className={`${INPUT} bg-[#F8FAFC]`} style={{ boxShadow: "none" }} />
+            </Field>
             <Field label="School"><TextInput value={school} onChange={(e) => setSchool(e.target.value)} placeholder="e.g. University of Michigan" /></Field>
             <div className="grid grid-cols-2 gap-4">
               <Field label="Graduation year"><TextInput type="number" value={gradYear} onChange={(e) => setGradYear(e.target.value)} placeholder="2026" /></Field>
@@ -331,23 +385,25 @@ export default function SettingsPage() {
               <div className="relative flex-1">
                 <input
                   type="text"
-                  value={showKey ? omiKey : maskedKey}
-                  onChange={(e) => { if (showKey) setOmiKey(e.target.value); }}
-                  onFocus={(e) => { setShowKey(true); e.currentTarget.style.boxShadow = FOCUS_SHADOW; }}
+                  value={omiDisplay}
+                  onChange={(e) => { setOmiKeyDirty(true); setOmiKey(e.target.value); setShowKey(true); }}
+                  onFocus={(e) => { if (!omiKeyDirty) { setOmiKey(""); setShowKey(true); } e.currentTarget.style.boxShadow = FOCUS_SHADOW; }}
                   onBlur={(e) => (e.currentTarget.style.boxShadow = "none")}
-                  placeholder="Paste your Omi API key"
+                  placeholder={omiKeyMasked ? "Enter a new key to replace" : "Paste your Omi API key"}
                   className={INPUT}
                   style={{ boxShadow: "none", paddingRight: "72px" }}
                 />
-                <button
-                  type="button"
-                  onClick={() => setShowKey((v) => !v)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[12px] font-medium text-[--color-accent] hover:opacity-80"
-                >
-                  {showKey ? "Hide" : "Show"}
-                </button>
+                {omiKeyDirty && (
+                  <button
+                    type="button"
+                    onClick={() => setShowKey((v) => !v)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-[12px] font-medium text-[--color-accent] hover:opacity-80"
+                  >
+                    {showKey ? "Hide" : "Show"}
+                  </button>
+                )}
               </div>
-              <button onClick={saveOmiKey} disabled={savingKey} className={BTN_PRIMARY} style={BTN_PRIMARY_STYLE}>
+              <button onClick={saveOmiKey} disabled={savingKey || !omiKeyDirty} className={BTN_PRIMARY} style={BTN_PRIMARY_STYLE}>
                 {savingKey ? "Saving..." : "Save"}
               </button>
             </div>
@@ -378,9 +434,7 @@ export default function SettingsPage() {
           <h2 className="text-[11px] font-semibold uppercase text-[--color-text-tertiary]" style={{ letterSpacing: "0.08em" }}>
             Change Password
           </h2>
-          <p className="mt-1 mb-5 text-[13px] text-[--color-text-tertiary]">
-            Minimum 8 characters.
-          </p>
+          <p className="mt-1 mb-5 text-[13px] text-[--color-text-tertiary]">Minimum 8 characters.</p>
 
           <div className="space-y-4">
             <Field label="Current password">
@@ -414,23 +468,16 @@ export default function SettingsPage() {
             Account
           </h2>
 
-          <div className="mt-5 space-y-4">
-            <Field label="Email">
-              <input type="email" value={user?.email ?? ""} readOnly className={`${INPUT} bg-[#F8FAFC]`} style={{ boxShadow: "none" }} />
-            </Field>
-
-            <div className="flex justify-start pt-2">
-              <button
-                onClick={logout}
-                className="rounded-full border border-[--color-border] bg-[--color-card] px-5 py-2.5 text-[14px] font-medium text-[--color-text-primary] transition-all duration-200 hover:bg-[#F8FAFC] hover:border-[#CBD5E1]"
-              >
-                Log out
-              </button>
-            </div>
+          <div className="mt-5">
+            <button
+              onClick={logout}
+              className="rounded-full border border-[--color-border] bg-[--color-card] px-5 py-2.5 text-[14px] font-medium text-[--color-text-primary] transition-all duration-200 hover:bg-[#F8FAFC] hover:border-[#CBD5E1]"
+            >
+              Log out
+            </button>
           </div>
         </section>
 
-        {/* Dead-simple bottom link */}
         <div className="mt-12 text-center">
           <Link href="/dashboard" className="text-[13px] text-[--color-text-tertiary] hover:text-[--color-text-secondary]">
             ← Back to dashboard

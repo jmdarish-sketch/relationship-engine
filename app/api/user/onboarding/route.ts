@@ -35,7 +35,17 @@ export async function POST(request: NextRequest) {
 
   const d = parsed.data;
 
-  // TODO: Replace stub with actual Anthropic API call in Prompt 4
+  const profileData = {
+    school: d.school ?? null,
+    graduation_year: d.graduation_year ?? null,
+    major: d.major ?? null,
+    current_role: d.current_role ?? null,
+    career_interests: d.career_interests ?? [],
+    networking_goals: d.networking_goals ?? null,
+    personal_interests: d.personal_interests ?? [],
+    skills: d.skills ?? [],
+  };
+
   const profileParts = [
     d.current_role ? `Current role: ${d.current_role}` : null,
     d.school ? `School: ${d.school}` : null,
@@ -52,6 +62,7 @@ export async function POST(request: NextRequest) {
   const user = await prisma.user.update({
     where: { id: userId },
     data: {
+      profileData,
       profileSummary,
       onboardingCompleted: true,
     },
