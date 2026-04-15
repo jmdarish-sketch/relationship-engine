@@ -1,13 +1,25 @@
 import { NextRequest } from "next/server";
+import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireUserId } from "@/lib/api/auth";
 import { ok, badRequest, unauthorized } from "@/lib/api/response";
 import { callSonnet } from "@/lib/ai/anthropic";
 import { profileSummaryPrompt } from "@/lib/ai/prompts";
 
+const schema = z.object({
+  school: z.string().nullable().optional(),
+  graduation_year: z.number().int().nullable().optional(),
+  major: z.string().nullable().optional(),
+  current_role: z.string().nullable().optional(),
+  career_interests: z.array(z.string()).optional(),
+  networking_goals: z.string().nullable().optional(),
+  personal_interests: z.array(z.string()).optional(),
+  skills: z.array(z.string()).optional(),
+});
+
 /**
- * POST /api/onboarding
- * Save onboarding data and generate profile summary.
+ * POST /api/profile
+ * Update the user's onboarding profile fields and regenerate profile_summary.
  */
 export async function POST(request: NextRequest) {
   let userId: string;
@@ -18,26 +30,29 @@ export async function POST(request: NextRequest) {
   }
 
   const body = await request.json();
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    return badRequest("Validation failed", parsed.error.flatten());
+  }
 
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { fullName: true },
   });
-
   if (!user) return badRequest("User not found");
 
+  const d = parsed.data;
   const profileData = {
-    school: body.school ?? null,
-    graduation_year: body.graduation_year ?? null,
-    major: body.major ?? null,
-    current_role: body.current_role ?? null,
-    career_interests: body.career_interests ?? [],
-    networking_goals: body.networking_goals ?? null,
-    personal_interests: body.personal_interests ?? [],
-    skills: body.skills ?? [],
+    school: d.school ?? null,
+    graduation_year: d.graduation_year ?? null,
+    major: d.major ?? null,
+    current_role: d.current_role ?? null,
+    career_interests: d.career_interests ?? [],
+    networking_goals: d.networking_goals ?? null,
+    personal_interests: d.personal_interests ?? [],
+    skills: d.skills ?? [],
   };
 
-  // Generate profile summary with Claude
   let profileSummary: string | null = null;
   try {
     const { system, user: userPrompt } = profileSummaryPrompt({
@@ -51,20 +66,15 @@ export async function POST(request: NextRequest) {
       personalInterests: profileData.personal_interests,
       skills: profileData.skills,
     });
-
     const raw = await callSonnet(system, userPrompt);
     profileSummary = raw.trim() || null;
   } catch (err) {
-    console.error("[onboarding] Profile summary generation failed:", err);
+    console.error("[profile] Summary regeneration failed:", err);
   }
 
   const updated = await prisma.user.update({
     where: { id: userId },
-    data: {
-      profileSummary,
-      profileData,
-      onboardingCompleted: true,
-    },
+    data: { profileData, profileSummary },
     omit: { passwordHash: true },
   });
 

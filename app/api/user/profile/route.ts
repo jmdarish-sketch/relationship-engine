@@ -27,6 +27,7 @@ export async function GET(request: NextRequest) {
 const updateSchema = z.object({
   full_name: z.string().min(1).optional(),
   profile_summary: z.string().nullable().optional(),
+  omi_api_key: z.string().nullable().optional(),
 });
 
 export async function PUT(request: NextRequest) {
@@ -52,6 +53,7 @@ export async function PUT(request: NextRequest) {
       ...(d.profile_summary !== undefined && {
         profileSummary: d.profile_summary,
       }),
+      ...(d.omi_api_key !== undefined && { omiApiKey: d.omi_api_key }),
     },
     omit: { passwordHash: true },
   });

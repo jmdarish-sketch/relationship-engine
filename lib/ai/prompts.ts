@@ -272,6 +272,8 @@ export function profileSummaryPrompt(data: {
   major?: string | null;
   graduationYear?: number | null;
   careerInterests?: string[];
+  networkingGoals?: string | null;
+  personalInterests?: string[];
   skills?: string[];
 }) {
   const parts = [
@@ -282,6 +284,10 @@ export function profileSummaryPrompt(data: {
     data.graduationYear ? `Graduation: ${data.graduationYear}` : null,
     data.careerInterests?.length
       ? `Career interests: ${data.careerInterests.join(", ")}`
+      : null,
+    data.networkingGoals ? `Networking goals: ${data.networkingGoals}` : null,
+    data.personalInterests?.length
+      ? `Personal interests: ${data.personalInterests.join(", ")}`
       : null,
     data.skills?.length ? `Skills: ${data.skills.join(", ")}` : null,
   ]
