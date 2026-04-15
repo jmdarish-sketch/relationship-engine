@@ -305,9 +305,9 @@ export default function LandingPage() {
           <span className="text-[14px] text-[--color-text-secondary]">Relationship Engine</span>
           <div className="flex items-center gap-6 text-[13px] text-[--color-text-tertiary]">
             <Link href="/login" className="hover:text-[--color-text-secondary] transition-colors">Log In</Link>
-            <a href="#" className="hover:text-[--color-text-secondary] transition-colors">Privacy</a>
-            <a href="#" className="hover:text-[--color-text-secondary] transition-colors">Terms</a>
-            <a href="#" className="hover:text-[--color-text-secondary] transition-colors">Contact</a>
+            <Link href="/privacy" className="hover:text-[--color-text-secondary] transition-colors">Privacy</Link>
+            <Link href="/terms" className="hover:text-[--color-text-secondary] transition-colors">Terms</Link>
+            <Link href="/contact" className="hover:text-[--color-text-secondary] transition-colors">Contact</Link>
           </div>
         </div>
         <p className="mt-6 text-center text-[12px] text-[--color-text-tertiary]">© 2026 Relationship Engine. All rights reserved.</p>
