@@ -18,7 +18,22 @@ export async function POST(request: NextRequest) {
   }
 
   // --- Authenticate ---
-  const uid = request.nextUrl.searchParams.get("uid");
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const rawUid = request.nextUrl.searchParams.get("uid");
+  // Omi may append its own ?uid= param to our URL, producing a value like
+  // "our-uuid?uid=omi-uid". Strip anything after '?' to recover our UUID.
+  const cleanUid = rawUid?.split("?")[0] ?? null;
+  const omiAppendedUid = rawUid && rawUid.includes("?") ? rawUid.split("?")[1]?.replace("uid=", "") : null;
+
+  // TODO: We may want to store omiAppendedUid as omiUserId on the User record later
+  if (omiAppendedUid) {
+    console.log(`[omi-webhook] Omi appended uid: ${omiAppendedUid} (our uid: ${cleanUid})`);
+  }
+
+  if (cleanUid && !UUID_RE.test(cleanUid)) {
+    return NextResponse.json({ error: "Invalid user ID format" }, { status: 400 });
+  }
+
   const apiKey = request.headers
     .get("authorization")
     ?.replace("Bearer ", "");
@@ -26,10 +41,9 @@ export async function POST(request: NextRequest) {
 
   let userId: string | null = null;
 
-  if (uid) {
-    // Look up user by ID directly
+  if (cleanUid) {
     const user = await prisma.user.findUnique({
-      where: { id: uid },
+      where: { id: cleanUid },
       select: { id: true },
     });
     if (user) userId = user.id;
