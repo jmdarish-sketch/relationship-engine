@@ -7,7 +7,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { usePerson, useGenerateInsight } from "@/hooks/useApi";
 import Navbar from "@/components/Navbar";
 import Skeleton from "@/components/Skeleton";
-import type { PrepBrief } from "@/lib/ai/insights";
+import type { PrepBrief, OutreachDraft } from "@/lib/ai/insights";
 
 // Types
 interface Interaction { id: string; source: string; summary: string | null; rawTranscript: string | null; interactionDate: string; processingStatus: string; location: string | null; }
@@ -208,23 +208,185 @@ function PrepBriefCard({ brief, insight, onCopy, copied, onRegenerate, regenerat
   );
 }
 
-// Old-format brief fallback — shows regenerate button
-function StaleInsightCard({ insight, onRegenerate, regenerating }: {
+// Old-format fallback — shows regenerate button
+function StaleInsightCard({ insight, insightType, onRegenerate, regenerating }: {
   insight: Insight;
+  insightType: string;
   onRegenerate: () => void;
   regenerating: boolean;
 }) {
+  const labels: Record<string, string> = { prep_brief: "Prep Brief", outreach_suggestion: "Outreach Draft" };
   return (
     <div className="rounded-2xl bg-[--color-card] p-6" style={{ boxShadow: "var(--shadow-card)" }}>
       <div className="flex items-center justify-between mb-3">
-        <span className="rounded-full px-2.5 py-1 text-[11px] font-medium" style={{ background: "#EFF6FF", color: "#3B82F6" }}>Prep Brief (outdated)</span>
+        <span className="rounded-full px-2.5 py-1 text-[11px] font-medium" style={{ background: "#EFF6FF", color: "#3B82F6" }}>{labels[insightType] ?? insightType} (outdated)</span>
       </div>
-      <p className="text-[14px] text-[--color-text-tertiary]">This brief was generated with an older format. Regenerate for a richer, structured brief.</p>
+      <p className="text-[14px] text-[--color-text-tertiary]">This was generated with an older format. Regenerate for the updated version.</p>
       <button onClick={onRegenerate} disabled={regenerating}
         className="mt-4 rounded-full px-5 py-2 text-[13px] font-semibold text-white transition-all hover:-translate-y-px disabled:opacity-50"
         style={{ background: "linear-gradient(135deg, #3B82F6, #2563EB)", boxShadow: "var(--shadow-button)" }}>
-        {regenerating ? "Regenerating..." : "Regenerate prep brief"}
+        {regenerating ? "Regenerating..." : "Regenerate"}
       </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// OutreachCard — strategy picker with progressive disclosure
+// ---------------------------------------------------------------------------
+
+const channelConfig: Record<string, { label: string; icon: React.ReactNode }> = {
+  email: { label: "Email", icon: <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" /> },
+  linkedin: { label: "LinkedIn", icon: <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m9.86-2.54a4.5 4.5 0 00-6.364-6.364L4.5 8.257" /> },
+  text: { label: "Text", icon: <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" /> },
+  whatsapp: { label: "WhatsApp", icon: <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" /> },
+};
+const toneColors: Record<string, { bg: string; color: string }> = {
+  casual: { bg: "rgba(59,130,246,0.08)", color: "#3B82F6" },
+  professional: { bg: "rgba(113,113,122,0.08)", color: "#71717A" },
+  warm: { bg: "rgba(245,158,11,0.08)", color: "#D97706" },
+};
+
+function tryParseOutreach(insight: Insight): OutreachDraft | null {
+  try {
+    const obj = (insight.metadata ?? JSON.parse(insight.content)) as Record<string, unknown>;
+    if (obj && typeof obj === "object" && Array.isArray(obj.strategies) && obj.strategies.length > 0 && (obj.strategies[0] as Record<string, unknown>).one_liner) {
+      return obj as unknown as OutreachDraft;
+    }
+  } catch {}
+  return null;
+}
+
+function OutreachCard({ draft, insight, onCopy, copied, onRegenerate, regenerating }: {
+  draft: OutreachDraft;
+  insight: Insight;
+  onCopy: (text: string, key: string) => void;
+  copied: string | null;
+  onRegenerate: () => void;
+  regenerating: boolean;
+}) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  function copyMessage(strategy: OutreachDraft["strategies"][0], key: string) {
+    const text = strategy.channel === "email" && strategy.message.subject
+      ? `${strategy.message.subject}\n\n${strategy.message.body}`
+      : strategy.message.body;
+    onCopy(text, key);
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <span className="rounded-full px-2.5 py-1 text-[11px] font-medium" style={{ background: "rgba(34,197,94,0.08)", color: "#22C55E" }}>Outreach Strategies</span>
+        <div className="flex items-center gap-3">
+          <button onClick={onRegenerate} disabled={regenerating} className="text-[12px] text-[--color-accent] hover:underline disabled:opacity-50">
+            {regenerating ? "Regenerating..." : "Regenerate"}
+          </button>
+          <span className="text-[12px] text-[--color-text-tertiary]">{timeAgo(insight.createdAt)}</span>
+        </div>
+      </div>
+
+      {/* Context note */}
+      {draft.context_note && (
+        <div className="rounded-xl bg-[#FAFAFA] px-4 py-3 text-[13px] text-[--color-text-secondary] leading-[1.55]">
+          {draft.context_note}
+        </div>
+      )}
+
+      {/* Strategy cards */}
+      {draft.strategies.map((s) => {
+        const isExpanded = expanded === s.id;
+        const ch = channelConfig[s.channel] ?? channelConfig.text;
+        const tn = toneColors[s.tone] ?? toneColors.casual;
+
+        return (
+          <div key={s.id}
+            className={`rounded-2xl bg-[--color-card] transition-all duration-200 ${isExpanded ? "" : "cursor-pointer hover:-translate-y-px"}`}
+            style={{ boxShadow: "var(--shadow-card)" }}
+            onClick={() => { if (!isExpanded) setExpanded(s.id); }}
+            onMouseEnter={(e) => { if (!isExpanded) e.currentTarget.style.boxShadow = "var(--shadow-card-hover)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.boxShadow = "var(--shadow-card)"; }}
+          >
+            {/* Compact view — always visible */}
+            <div className={`p-5 ${isExpanded ? "pb-3" : ""}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="text-[15px] font-semibold text-[--color-text-primary]">{s.name}</p>
+                  <p className="mt-1 text-[13px] leading-[1.5] text-[--color-text-secondary]">{s.one_liner}</p>
+                </div>
+                {isExpanded && (
+                  <button onClick={(e) => { e.stopPropagation(); setExpanded(null); }} className="shrink-0 text-[--color-text-tertiary] hover:text-[--color-text-secondary]">
+                    <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+              <div className="mt-2.5 flex items-center gap-2">
+                <span className="inline-flex items-center gap-1 rounded-full bg-[#F4F4F5] px-2 py-0.5 text-[11px] font-medium text-[--color-text-secondary]">
+                  <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" strokeWidth={1.8} stroke="currentColor">{ch.icon}</svg>
+                  {ch.label}
+                </span>
+                <span className="rounded-full px-2 py-0.5 text-[11px] font-medium" style={{ background: tn.bg, color: tn.color }}>{s.tone}</span>
+              </div>
+            </div>
+
+            {/* Expanded view — message + details */}
+            {isExpanded && (
+              <div className="px-5 pb-5">
+                <div style={{ height: "0.5px", background: "var(--color-border-subtle)", margin: "4px 0 16px 0" }} />
+
+                {/* Subject (email only) */}
+                {s.channel === "email" && s.message.subject && (
+                  <div className="mb-3">
+                    <p className="text-[11px] font-semibold uppercase text-[--color-text-tertiary]" style={{ letterSpacing: "0.05em" }}>Subject</p>
+                    <p className="mt-1 text-[14px] font-medium text-[--color-text-primary]">{s.message.subject}</p>
+                  </div>
+                )}
+
+                {/* Message body */}
+                <div className="rounded-xl bg-[#FAFAFA] p-4">
+                  <p className="text-[14px] leading-[1.65] text-[--color-text-primary] whitespace-pre-wrap">{s.message.body}</p>
+                </div>
+
+                {/* Actions */}
+                <div className="mt-3 flex items-center gap-2">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); copyMessage(s, `msg-${s.id}`); }}
+                    className="rounded-full px-4 py-1.5 text-[12px] font-semibold text-white transition-all hover:-translate-y-px"
+                    style={{ background: "linear-gradient(135deg, #3B82F6, #2563EB)" }}
+                  >
+                    {copied === `msg-${s.id}` ? "Copied!" : "Copy message"}
+                  </button>
+                  {s.channel === "email" && s.message.subject && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onCopy(s.message.subject!, `subj-${s.id}`); }}
+                      className="rounded-full border border-[--color-border] px-3 py-1.5 text-[12px] font-medium text-[--color-text-secondary] transition-colors hover:bg-[#F8FAFC]"
+                    >
+                      {copied === `subj-${s.id}` ? "Copied!" : "Copy subject"}
+                    </button>
+                  )}
+                </div>
+
+                {/* Why this works */}
+                <div className="mt-4">
+                  <p className="text-[12px] leading-[1.55] text-[--color-text-tertiary]">{s.why_this_works}</p>
+                </div>
+
+                {/* Grounded in */}
+                {s.grounded_in && s.grounded_in.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {s.grounded_in.map((ref, i) => (
+                      <span key={i} className="rounded-full bg-[#F4F4F5] px-2 py-0.5 text-[10px] text-[--color-text-tertiary]">{ref}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -337,7 +499,16 @@ export default function PersonDetailPage() {
                   if (parsed) {
                     return <PrepBriefCard key={ins.id} brief={parsed} insight={ins} onCopy={copyText} copied={copied} onRegenerate={() => handleGenerate("prep_brief")} regenerating={generating === "prep_brief"} />;
                   }
-                  return <StaleInsightCard key={ins.id} insight={ins} onRegenerate={() => handleGenerate("prep_brief")} regenerating={generating === "prep_brief"} />;
+                  return <StaleInsightCard key={ins.id} insight={ins} insightType="prep_brief" onRegenerate={() => handleGenerate("prep_brief")} regenerating={generating === "prep_brief"} />;
+                }
+
+                // Outreach: strategy picker or stale fallback
+                if (ins.insightType === "outreach_suggestion") {
+                  const parsed = tryParseOutreach(ins);
+                  if (parsed) {
+                    return <OutreachCard key={ins.id} draft={parsed} insight={ins} onCopy={copyText} copied={copied} onRegenerate={() => handleGenerate("outreach_suggestion")} regenerating={generating === "outreach_suggestion"} />;
+                  }
+                  return <StaleInsightCard key={ins.id} insight={ins} insightType="outreach_suggestion" onRegenerate={() => handleGenerate("outreach_suggestion")} regenerating={generating === "outreach_suggestion"} />;
                 }
 
                 // Other insight types: default rendering

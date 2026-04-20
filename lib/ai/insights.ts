@@ -60,7 +60,7 @@ async function getPersonContext(personId: string, userId: string) {
     }),
     prisma.user.findUnique({
       where: { id: userId },
-      select: { profileSummary: true, fullName: true },
+      select: { profileSummary: true, fullName: true, profileData: true },
     }),
   ]);
 
@@ -82,6 +82,7 @@ async function getPersonContext(personId: string, userId: string) {
     })),
     insights,
     profileSummary: user?.profileSummary ?? null,
+    profileData: (user?.profileData as Record<string, unknown> | null) ?? null,
     userName: user?.fullName ?? null,
   };
 }
@@ -125,6 +126,7 @@ export async function generatePrepBrief(personId: string, userId: string) {
     ctx.interactions,
     ctx.insights,
     ctx.profileSummary,
+    ctx.profileData,
     ctx.userName
   );
 
@@ -132,6 +134,10 @@ export async function generatePrepBrief(personId: string, userId: string) {
   const parsed = parseStructuredResponse<PrepBrief>(raw);
 
   const content = parsed ? JSON.stringify(parsed) : raw;
+
+  await prisma.insight.deleteMany({
+    where: { personId, userId, insightType: "prep_brief" },
+  });
 
   const insight = await prisma.insight.create({
     data: {
@@ -151,14 +157,20 @@ export async function generatePrepBrief(personId: string, userId: string) {
 // Outreach suggestion
 // ---------------------------------------------------------------------------
 
-interface OutreachResult {
-  strategies: {
-    channel: string;
-    rationale: string;
-    subject?: string;
-    message: string;
-    tone: string;
-  }[];
+export interface OutreachStrategy {
+  id: string;
+  name: string;
+  one_liner: string;
+  channel: "email" | "linkedin" | "text" | "whatsapp";
+  tone: "casual" | "professional" | "warm";
+  message: { subject: string | null; body: string };
+  why_this_works: string;
+  grounded_in: string[];
+}
+
+export interface OutreachDraft {
+  strategies: OutreachStrategy[];
+  context_note: string | null;
 }
 
 export async function generateOutreachSuggestion(
@@ -170,13 +182,21 @@ export async function generateOutreachSuggestion(
   const { system, user } = outreachPrompt(
     ctx.person,
     ctx.details,
-    ctx.profileSummary
+    ctx.interactions,
+    ctx.insights,
+    ctx.profileSummary,
+    ctx.profileData,
+    ctx.userName
   );
 
   const raw = await callSonnet(system, user);
-  const parsed = parseStructuredResponse<OutreachResult>(raw);
+  const parsed = parseStructuredResponse<OutreachDraft>(raw);
 
   const content = parsed ? JSON.stringify(parsed) : raw;
+
+  await prisma.insight.deleteMany({
+    where: { personId, userId, insightType: "outreach_suggestion" },
+  });
 
   const insight = await prisma.insight.create({
     data: {
