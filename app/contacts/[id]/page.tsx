@@ -52,11 +52,11 @@ function tryParsePrep(insight: Insight): PrepBrief | null {
 // PrepBriefCard — structured rendering
 // ---------------------------------------------------------------------------
 
-// Chevron icon reused across accordions
+// Chevron icon reused across accordions: right when collapsed, down when expanded
 function Chevron({ open }: { open: boolean }) {
   return (
-    <svg className={`h-4 w-4 shrink-0 text-[--color-text-tertiary] transition-transform duration-200 ${open ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+    <svg className={`h-4 w-4 shrink-0 text-[--color-text-tertiary] transition-transform duration-200 ${open ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
     </svg>
   );
 }
@@ -622,7 +622,7 @@ export default function PersonDetailPage() {
         {/* Identity Signals */}
         <section className="mb-16">
           <button onClick={() => setShowSignals(!showSignals)} className="flex items-center gap-1.5 text-[14px] font-semibold text-[--color-text-secondary] hover:text-[--color-text-primary] transition-colors">
-            <svg className={`h-4 w-4 transition-transform duration-200 ${showSignals ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" /></svg>
+            <svg className={`h-4 w-4 transition-transform duration-200 ${showSignals ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" /></svg>
             Identity Signals ({person.identitySignals.length})
           </button>
           {showSignals && (
