@@ -4,7 +4,7 @@ import { callSonnet, parseStructuredResponse } from "./anthropic";
 import { prepBriefPrompt, outreachPrompt } from "./prompts";
 
 // ---------------------------------------------------------------------------
-// Fetch shared context for a person
+// Fetch shared context for a person (enriched for prep briefs)
 // ---------------------------------------------------------------------------
 
 async function getPersonContext(personId: string, userId: string) {
@@ -16,27 +16,51 @@ async function getPersonContext(personId: string, userId: string) {
       fingerprint: true,
       employer: true,
       school: true,
+      userCurrentRole: true,
+      firstName: true,
+      lastName: true,
     },
   });
 
   if (!person) throw new Error("Person not found");
 
-  const [details, insights, user] = await Promise.all([
+  const [details, interactions, insights, user] = await Promise.all([
     prisma.extractedDetail.findMany({
       where: { personId },
       orderBy: { createdAt: "desc" },
-      take: 30,
-      select: { category: true, detailKey: true, detailValue: true },
+      take: 50,
+      select: {
+        category: true,
+        detailKey: true,
+        detailValue: true,
+        confidence: true,
+        createdAt: true,
+      },
+    }),
+    prisma.interaction.findMany({
+      where: {
+        interactionPeople: { some: { personId } },
+        processingStatus: "completed",
+      },
+      orderBy: { interactionDate: "desc" },
+      take: 20,
+      select: {
+        id: true,
+        summary: true,
+        interactionDate: true,
+        source: true,
+        rawTranscript: true,
+      },
     }),
     prisma.insight.findMany({
-      where: { personId, userId },
+      where: { personId, userId, insightType: { not: "prep_brief" } },
       orderBy: { createdAt: "desc" },
       take: 10,
-      select: { content: true },
+      select: { insightType: true, content: true, createdAt: true },
     }),
     prisma.user.findUnique({
       where: { id: userId },
-      select: { profileSummary: true },
+      select: { profileSummary: true, fullName: true },
     }),
   ]);
 
@@ -46,9 +70,19 @@ async function getPersonContext(personId: string, userId: string) {
       category: d.category,
       key: d.detailKey,
       value: d.detailValue,
+      confidence: d.confidence,
+      createdAt: d.createdAt,
+    })),
+    interactions: interactions.map((i) => ({
+      id: i.id,
+      summary: i.summary,
+      date: i.interactionDate,
+      source: i.source,
+      transcript: i.rawTranscript,
     })),
     insights,
     profileSummary: user?.profileSummary ?? null,
+    userName: user?.fullName ?? null,
   };
 }
 
@@ -56,12 +90,30 @@ async function getPersonContext(personId: string, userId: string) {
 // Prep brief
 // ---------------------------------------------------------------------------
 
-interface PrepBrief {
-  headline: string;
-  key_context: string;
-  talking_points: { topic: string; opener: string; why: string }[];
-  open_loops: { description: string; owner: string; approach: string }[];
-  tone_guidance: string;
+export interface PrepBrief {
+  meeting_purpose: string;
+  since_last_contact: {
+    time_since_last_interaction: string;
+    whats_new_for_them: string[];
+  };
+  what_they_know_about_you: string[];
+  open_loops: Array<{
+    thread: string;
+    status: "user_owes" | "they_owe" | "mutual" | "dormant";
+    age: string;
+    suggested_move: string;
+  }>;
+  conversation_hooks: Array<{
+    hook: string;
+    grounded_in: string;
+    why_it_lands: string;
+  }>;
+  watch_outs: string[];
+  the_ask: {
+    has_ask: boolean;
+    what_you_want: string | null;
+    how_to_raise_it: string | null;
+  } | null;
 }
 
 export async function generatePrepBrief(personId: string, userId: string) {
@@ -70,16 +122,16 @@ export async function generatePrepBrief(personId: string, userId: string) {
   const { system, user } = prepBriefPrompt(
     ctx.person,
     ctx.details,
+    ctx.interactions,
     ctx.insights,
-    ctx.profileSummary
+    ctx.profileSummary,
+    ctx.userName
   );
 
   const raw = await callSonnet(system, user);
   const parsed = parseStructuredResponse<PrepBrief>(raw);
 
-  const content = parsed
-    ? JSON.stringify(parsed)
-    : raw;
+  const content = parsed ? JSON.stringify(parsed) : raw;
 
   const insight = await prisma.insight.create({
     data: {
@@ -88,7 +140,7 @@ export async function generatePrepBrief(personId: string, userId: string) {
       insightType: "prep_brief",
       content,
       metadata: parsed ? (parsed as unknown as Prisma.InputJsonValue) : undefined,
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24h
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
     },
   });
 
@@ -124,9 +176,7 @@ export async function generateOutreachSuggestion(
   const raw = await callSonnet(system, user);
   const parsed = parseStructuredResponse<OutreachResult>(raw);
 
-  const content = parsed
-    ? JSON.stringify(parsed)
-    : raw;
+  const content = parsed ? JSON.stringify(parsed) : raw;
 
   const insight = await prisma.insight.create({
     data: {

@@ -3,6 +3,8 @@ import { z } from "zod";
 import { requireUserId } from "@/lib/api/auth";
 import { ok, badRequest, notFound, unauthorized, err } from "@/lib/api/response";
 import { prisma } from "@/lib/prisma";
+
+export const maxDuration = 60;
 import {
   generatePrepBrief,
   generateOutreachSuggestion,

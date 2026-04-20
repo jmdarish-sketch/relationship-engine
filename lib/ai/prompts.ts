@@ -154,56 +154,139 @@ Return ONLY this JSON:
 }
 
 /**
- * Prep brief: generate a conversational briefing before meeting someone.
- * Injected with user profile so the brief can highlight shared interests,
- * relevant offers, and appropriate conversation starters.
+ * Prep brief: generate a high-signal conversational briefing before meeting someone.
+ * Receives full interaction history, extracted details, and action items so every
+ * recommendation is grounded in specific conversation data.
  */
 export function prepBriefPrompt(
   personData: {
     displayName: string;
+    firstName: string | null;
     fingerprint: unknown;
     employer: string | null;
     school: string | null;
+    userCurrentRole: string | null;
   },
-  recentDetails: { category: string; key: string; value: string }[],
-  recentInsights: { content: string }[],
-  profileSummary: string | null
+  recentDetails: { category: string; key: string; value: string; confidence: number | null; createdAt: Date }[],
+  interactions: { id: string; summary: string | null; date: Date; source: string; transcript: string | null }[],
+  recentInsights: { insightType: string; content: string; createdAt: Date }[],
+  profileSummary: string | null,
+  userName: string | null
 ) {
   const userContext = profileSummary
-    ? `About you (the user): ${profileSummary}\n\n`
-    : "";
+    ? `ABOUT YOU (${userName ?? "the user"}): ${profileSummary}`
+    : userName ? `ABOUT YOU: ${userName}` : "";
 
-  const details = recentDetails
-    .map((d) => `[${d.category}/${d.key}] ${d.value}`)
-    .join("\n");
+  const interactionLog = interactions.length > 0
+    ? interactions.map((i) => {
+        const dateStr = i.date.toISOString().slice(0, 10);
+        const transcript = i.transcript ? `\n  Transcript excerpt: ${i.transcript.slice(0, 800)}` : "";
+        return `- ${dateStr} (${i.source}): ${i.summary ?? "No summary"}${transcript}`;
+      }).join("\n")
+    : "No interactions recorded.";
 
-  const insights = recentInsights.map((i) => i.content).join("\n");
+  const detailsText = recentDetails.length > 0
+    ? recentDetails.map((d) => {
+        const date = d.createdAt.toISOString().slice(0, 10);
+        return `- [${d.category}/${d.key}] ${d.value} (${date})`;
+      }).join("\n")
+    : "No extracted details.";
+
+  const actionItems = recentDetails
+    .filter((d) => d.category === "action_item")
+    .map((d) => `- ${d.value} (extracted ${d.createdAt.toISOString().slice(0, 10)})`)
+    .join("\n") || "None.";
+
+  const insightsText = recentInsights.length > 0
+    ? recentInsights.map((i) => `- [${i.insightType}] ${i.content.slice(0, 200)}`).join("\n")
+    : "None.";
 
   return {
-    system: `You are a relationship intelligence assistant preparing a conversational briefing. Write in second person ("You should mention..."). Be specific and actionable — not a dossier, but a 30-second briefing a sharp friend would give you before a meeting.
+    system: `You are a relationship intelligence engine generating a prep brief for an upcoming meeting. The user is a college student networking for IB/startup/career opportunities. They will scan this on their phone 2 minutes before a coffee chat.
 
-RULES:
-- Lead with what matters RIGHT NOW
-- Frame things as natural conversation starters
-- Flag unfulfilled commitments
-- Note relational tone from past interactions
-- Keep under 200 words
-- Return JSON:
+HARD RULES:
+1. Generic LinkedIn-tier advice is failure. Every item must be grounded in specific conversation history or extracted relationship data provided below.
+2. Empty arrays and null fields are better than fabricated content. If there isn't enough signal for a watch-out, return empty. If there's no real ask, return has_ask: false.
+3. Never reference information that wasn't in the input data. No inference about their mood, career trajectory, or opinions unless explicitly stated in interactions.
+4. Open loops (promises, intros, follow-ups, questions left unanswered) are the highest-value section. Be thorough — check every interaction for unfulfilled commitments.
+5. Conversation hooks must each reference something the contact actually said or something extracted from prior interactions. Do NOT include generic openers like "congrats on the promotion" or "how's work going."
+6. Today's date is ${new Date().toISOString().slice(0, 10)}. Use it to compute time-since values accurately.
+
+Return ONLY valid JSON matching this exact schema — no prose, no markdown fences:
 {
-  "headline": "one-line summary of where things stand",
-  "key_context": "2-3 sentences of what to know going in",
-  "talking_points": [{ "topic": "", "opener": "", "why": "" }],
-  "open_loops": [{ "description": "", "owner": "USER or name", "approach": "" }],
-  "tone_guidance": "one sentence"
-}`,
-    user: `${userContext}Person: ${personData.displayName}
-Employer: ${personData.employer ?? "Unknown"}
-School: ${personData.school ?? "Unknown"}
+  "meeting_purpose": "One-sentence strategic framing of why this meeting matters. NOT 'catch up with X'. Name specific threads and outcomes.",
+  "since_last_contact": {
+    "time_since_last_interaction": "e.g. '3 weeks'",
+    "whats_new_for_them": ["Only things known to have changed since last interaction. Empty if nothing known."]
+  },
+  "what_they_know_about_you": ["What the contact has been told about the user in past conversations. Helps user avoid re-explaining."],
+  "open_loops": [
+    {
+      "thread": "The unresolved item — be specific",
+      "status": "user_owes | they_owe | mutual | dormant",
+      "age": "How long it's been open, computed from interaction dates",
+      "suggested_move": "How to naturally surface it — not just 'ask about it'"
+    }
+  ],
+  "conversation_hooks": [
+    {
+      "hook": "What to bring up — specific, not generic",
+      "grounded_in": "Exact reference to past conversation with date",
+      "why_it_lands": "One sentence on why this shows you listened"
+    }
+  ],
+  "watch_outs": ["Only if there's actual negative signal in conversation history. Empty array is fine and common."],
+  "the_ask": {
+    "has_ask": true,
+    "what_you_want": "Specific desired outcome — not 'career advice'",
+    "how_to_raise_it": "Concrete bridging sequence, not just 'ask him'"
+  }
+}
+
+If the_ask has no clear purpose beyond catching up, set has_ask to false with null fields. That's valid.
+
+--- FEW-SHOT EXAMPLES ---
+
+Here is an example of a BAD brief and a GOOD brief for the same contact with identical input data. Study the difference — the bad version is what we had before and is considered a failure mode.
+
+EXAMPLE INPUT (for both):
+Contact: George Chen. Ross alum (2019), VP at JPMorgan healthcare IB.
+Interactions:
+- Feb 12: Met at Ross alumni event. George mentioned his sophomore Pfizer internship got him into healthcare. "Waiting to hear back" on promotion. Brother just started at Ross. Offered to answer IB questions.
+- Feb 28: 45-min coffee. VP promotion confirmed. Compared healthcare IB vs other groups. Said he'd send a healthcare M&A reading list. Offered intro to former associate at Evercore. Jacob mentioned building a relationship-tracking app — George asked to see a demo "sometime."
+- Mar 15: 20-min Zoom. George mentioned his team hiring a summer analyst, posting going up soon. Still hadn't sent the reading list.
+Action items: George owes reading list. George owes Evercore intro. Jacob owes George app demo.
+
+BAD OUTPUT (failure mode):
+{"meeting_purpose":"Catch up with George and discuss career","since_last_contact":{"time_since_last_interaction":"about a month","whats_new_for_them":["George has been promoted to VP at JPMorgan"]},"open_loops":[{"thread":"Follow up on career advice","status":"mutual","age":"a while","suggested_move":"Ask George for his thoughts"}],"conversation_hooks":[{"hook":"Congrats on the VP promotion — what's changed?","grounded_in":"His recent promotion","why_it_lands":"Acknowledges success"}],"watch_outs":["Be respectful of his time"],"the_ask":{"has_ask":true,"what_you_want":"Career advice","how_to_raise_it":"Ask about pathways into IB"}}
+
+Why BAD: meeting_purpose generic. Promotion is stale (7 weeks old). Open loops fabricated — the REAL open loops (reading list, Evercore intro, demo) are missing. Hooks are LinkedIn-tier. Watch-out fabricated. Ask is vague.
+
+GOOD OUTPUT (quality bar):
+{"meeting_purpose":"Cash in on George's standing offer to answer IB questions — and nudge on the two things he owes you (healthcare M&A reading list, Evercore intro). Also show him the app demo he asked about.","since_last_contact":{"time_since_last_interaction":"5 weeks","whats_new_for_them":["His team's summer analyst cohort posting is going up (last mentioned Mar 15) — may be live now"]},"what_they_know_about_you":["Ross senior exploring IB vs startup paths","Interested in healthcare coverage specifically","Building a relationship-tracking app — he asked to see a demo 'sometime'","You found him through the Ross alumni network"],"open_loops":[{"thread":"George promised to send a healthcare M&A reading list","status":"they_owe","age":"7 weeks (offered Feb 28, not sent as of Mar 15)","suggested_move":"Don't ask directly — bring up a healthcare M&A topic you're curious about and let him naturally remember. If he doesn't, close with 'would still love that reading list whenever you get a chance.'"},{"thread":"George offered to intro you to his former associate who moved to Evercore","status":"they_owe","age":"7 weeks","suggested_move":"Ask something specific about Evercore's healthcare practice — gives him an organic reason to re-offer the intro."},{"thread":"You owe George a demo of the relationship-tracking app","status":"user_owes","age":"7 weeks","suggested_move":"Bring it up early — offer a 2-min walkthrough on your phone. Good reciprocity move before you ask for anything."},{"thread":"Summer analyst cohort hiring at his team","status":"dormant","age":"5 weeks","suggested_move":"Ask if the posting is live yet and whether it's worth applying given your timeline."}],"conversation_hooks":[{"hook":"How's your brother finding Ross so far?","grounded_in":"Feb 12 — mentioned his younger brother just started at Ross","why_it_lands":"Personal, specific, shows you retained a detail most people would forget"},{"hook":"You mentioned Pfizer was what got you into healthcare — what did that internship actually look like day-to-day?","grounded_in":"Feb 12 intro conversation about his sophomore internship","why_it_lands":"Gets him talking about formative experience, opens door to your own internship questions"},{"hook":"Curious how the VP transition has actually changed your work — more deal origination, less modeling?","grounded_in":"Promotion confirmed Feb 28, now 7 weeks into the role","why_it_lands":"Specific enough to show you understand IB role structure, not generic 'congrats' energy"}],"watch_outs":[],"the_ask":{"has_ask":true,"what_you_want":"Referral or active consideration for JPMorgan healthcare IB summer analyst cohort","how_to_raise_it":"Walk through the healthcare pathway discussion first, reference your existing healthcare interest, then transition: 'You mentioned your team's hiring — would it make sense for me to put my resume in front of you directly, or is there a different door I should knock on?'"}}
+
+Why GOOD: meeting_purpose names specific threads. Only genuinely new info in whats_new_for_them. All 4 real open loops caught with specific suggested_moves. Hooks reference dated moments. Watch-outs empty (correct). Ask is specific with bridging sequence.
+
+--- END EXAMPLES ---`,
+    user: `${userContext}
+
+CONTACT: ${personData.displayName}
+${personData.userCurrentRole ? `Role: ${personData.userCurrentRole}` : ""}
+${personData.employer ? `Employer: ${personData.employer}` : ""}
+${personData.school ? `School: ${personData.school}` : ""}
 Fingerprint: ${JSON.stringify(personData.fingerprint)}
 
-Known details:\n${details || "None yet"}
+INTERACTION HISTORY (most recent first):
+${interactionLog}
 
-Cross-references / insights:\n${insights || "None yet"}`,
+EXTRACTED DETAILS:
+${detailsText}
+
+ACTION ITEMS:
+${actionItems}
+
+PRIOR INSIGHTS/CROSS-REFERENCES:
+${insightsText}`,
   };
 }
 

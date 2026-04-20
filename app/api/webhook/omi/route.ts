@@ -1,6 +1,8 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { enqueueProcessing } from "@/lib/pipeline/queue";
+import { processInteraction } from "@/lib/pipeline/processor";
+
+export const maxDuration = 60;
 
 /**
  * POST /api/webhook/omi
@@ -158,9 +160,17 @@ export async function POST(request: NextRequest) {
     },
   });
 
-  // Trigger async processing if there's a transcript
+  // Schedule processing to run after the response is sent.
+  // after() keeps the Vercel function alive until the callback completes,
+  // unlike a detached promise which gets killed when the response returns.
   if (rawTranscript) {
-    enqueueProcessing(interaction.id);
+    after(async () => {
+      try {
+        await processInteraction(interaction.id);
+      } catch (err) {
+        console.error(`[omi-webhook] Processing failed for ${interaction.id}:`, err);
+      }
+    });
   }
 
   return NextResponse.json({

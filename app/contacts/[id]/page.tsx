@@ -7,19 +7,19 @@ import { useAuth } from "@/hooks/useAuth";
 import { usePerson, useGenerateInsight } from "@/hooks/useApi";
 import Navbar from "@/components/Navbar";
 import Skeleton from "@/components/Skeleton";
+import type { PrepBrief } from "@/lib/ai/insights";
 
 // Types
 interface Interaction { id: string; source: string; summary: string | null; rawTranscript: string | null; interactionDate: string; processingStatus: string; location: string | null; }
 interface ExtractedDetail { id: string; category: string; detailKey: string; detailValue: string; confidence: number | null; }
 interface IdentitySignal { id: string; signalType: string; signalValue: string; confidence: number; }
-interface Insight { id: string; insightType: string; content: string; createdAt: string; expiresAt: string | null; }
+interface Insight { id: string; insightType: string; content: string; metadata: unknown; createdAt: string; expiresAt: string | null; }
 interface PersonData { id: string; displayName: string; firstName: string | null; lastName: string | null; employer: string | null; userCurrentRole: string | null; school: string | null; email: string | null; phone: string | null; linkedinUrl: string | null; notes: string | null; updatedAt: string; interactions: Interaction[]; extractedDetails: ExtractedDetail[]; identitySignals: IdentitySignal[]; insights: Insight[]; }
 
 // Helpers
 function timeAgo(d: string) { const m = Math.floor((Date.now() - new Date(d).getTime()) / 60000); if (m < 1) return "just now"; if (m < 60) return `${m}m ago`; const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`; return `${Math.floor(h / 24)}d ago`; }
 function fmtDate(d: string) { return new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); }
 function hoursUntil(d: string) { return Math.max(0, Math.round((new Date(d).getTime() - Date.now()) / 3600000)); }
-function first(n: string | undefined) { return n?.split(" ")[0] ?? ""; }
 
 const insightBadge: Record<string, { label: string; bg: string; color: string }> = {
   prep_brief: { label: "Prep Brief", bg: "#EFF6FF", color: "#3B82F6" },
@@ -30,6 +30,204 @@ const insightBadge: Record<string, { label: string; bg: string; color: string }>
 };
 
 const categoryLabels: Record<string, string> = { career: "Career", education: "Education", personal: "Personal", preference: "Preferences", action_item: "Action Items", relationship: "Relationships" };
+
+const loopStatusConfig: Record<string, { label: string; bg: string; color: string }> = {
+  user_owes: { label: "You owe", bg: "rgba(245,158,11,0.1)", color: "#D97706" },
+  they_owe: { label: "They owe", bg: "rgba(59,130,246,0.1)", color: "#2563EB" },
+  mutual: { label: "Mutual", bg: "rgba(147,51,234,0.1)", color: "#9333EA" },
+  dormant: { label: "Dormant", bg: "rgba(113,113,122,0.1)", color: "#71717A" },
+};
+
+function tryParsePrep(insight: Insight): PrepBrief | null {
+  try {
+    const obj = (insight.metadata ?? JSON.parse(insight.content)) as Record<string, unknown>;
+    if (obj && typeof obj === "object" && "meeting_purpose" in obj && "open_loops" in obj) {
+      return obj as unknown as PrepBrief;
+    }
+  } catch {}
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// PrepBriefCard — structured rendering
+// ---------------------------------------------------------------------------
+
+function PrepBriefCard({ brief, insight, onCopy, copied, onRegenerate, regenerating }: {
+  brief: PrepBrief;
+  insight: Insight;
+  onCopy: (text: string, key: string) => void;
+  copied: string | null;
+  onRegenerate: () => void;
+  regenerating: boolean;
+}) {
+  const [showKnown, setShowKnown] = useState(false);
+
+  return (
+    <div className="space-y-3">
+      {/* Headline */}
+      <div className="rounded-2xl bg-[--color-card] p-6" style={{ boxShadow: "var(--shadow-card)", borderLeft: "3px solid #3B82F6" }}>
+        <div className="flex items-center justify-between mb-3">
+          <span className="rounded-full px-2.5 py-1 text-[11px] font-medium" style={{ background: "#EFF6FF", color: "#3B82F6" }}>Prep Brief</span>
+          <div className="flex items-center gap-3">
+            <button onClick={onRegenerate} disabled={regenerating} className="text-[12px] text-[--color-accent] hover:underline disabled:opacity-50">
+              {regenerating ? "Regenerating..." : "Regenerate"}
+            </button>
+            <button onClick={() => onCopy(JSON.stringify(brief, null, 2), insight.id)} className="text-[12px] text-[--color-text-tertiary] hover:text-[--color-text-secondary] transition-colors">
+              {copied === insight.id ? "Copied" : "Copy all"}
+            </button>
+          </div>
+        </div>
+        <p className="text-[16px] font-semibold leading-[1.5] text-[--color-text-primary]">{brief.meeting_purpose}</p>
+        <p className="mt-3 text-[12px] text-[--color-text-tertiary]">
+          Generated {timeAgo(insight.createdAt)}
+          {insight.expiresAt && <span className="text-[--color-warning]"> · Expires in {hoursUntil(insight.expiresAt)}h</span>}
+        </p>
+      </div>
+
+      {/* Since last contact */}
+      {brief.since_last_contact && brief.since_last_contact.whats_new_for_them.length > 0 && (
+        <div className="rounded-2xl bg-[--color-card] p-5" style={{ boxShadow: "var(--shadow-card)" }}>
+          <p className="text-[11px] font-semibold uppercase text-[--color-text-tertiary]" style={{ letterSpacing: "0.05em" }}>
+            Since last contact · {brief.since_last_contact.time_since_last_interaction}
+          </p>
+          <ul className="mt-3 space-y-1.5">
+            {brief.since_last_contact.whats_new_for_them.map((item, i) => (
+              <li key={i} className="flex items-start gap-2 text-[14px] text-[--color-text-primary]">
+                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[--color-accent]" />
+                {item}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* What they know about you — collapsible */}
+      {brief.what_they_know_about_you && brief.what_they_know_about_you.length > 0 && (
+        <div className="rounded-2xl bg-[--color-card] p-5" style={{ boxShadow: "var(--shadow-card)" }}>
+          <button onClick={() => setShowKnown(!showKnown)} className="flex w-full items-center justify-between">
+            <p className="text-[11px] font-semibold uppercase text-[--color-text-tertiary]" style={{ letterSpacing: "0.05em" }}>
+              What they know about you ({brief.what_they_know_about_you.length})
+            </p>
+            <svg className={`h-4 w-4 text-[--color-text-tertiary] transition-transform duration-200 ${showKnown ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+            </svg>
+          </button>
+          {showKnown && (
+            <ul className="mt-3 space-y-1.5">
+              {brief.what_they_know_about_you.map((item, i) => (
+                <li key={i} className="flex items-start gap-2 text-[13px] text-[--color-text-secondary]">
+                  <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[--color-border]" />
+                  {item}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {/* Open loops */}
+      {brief.open_loops && brief.open_loops.length > 0 && (
+        <div className="rounded-2xl bg-[--color-card] p-5" style={{ boxShadow: "var(--shadow-card)" }}>
+          <p className="text-[11px] font-semibold uppercase text-[--color-text-tertiary] mb-3" style={{ letterSpacing: "0.05em" }}>
+            Open loops
+          </p>
+          <div className="space-y-3">
+            {brief.open_loops.map((loop, i) => {
+              const cfg = loopStatusConfig[loop.status] ?? loopStatusConfig.dormant;
+              return (
+                <div key={i} className="rounded-xl bg-[#FAFAFA] p-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="rounded-full px-2 py-0.5 text-[10px] font-semibold" style={{ background: cfg.bg, color: cfg.color }}>{cfg.label}</span>
+                    <span className="text-[11px] text-[--color-text-tertiary]">{loop.age}</span>
+                  </div>
+                  <p className="text-[14px] font-medium text-[--color-text-primary]">{loop.thread}</p>
+                  <p className="mt-1.5 text-[13px] leading-[1.6] text-[--color-text-secondary]">{loop.suggested_move}</p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Conversation hooks */}
+      {brief.conversation_hooks && brief.conversation_hooks.length > 0 && (
+        <div className="rounded-2xl bg-[--color-card] p-5" style={{ boxShadow: "var(--shadow-card)" }}>
+          <p className="text-[11px] font-semibold uppercase text-[--color-text-tertiary] mb-3" style={{ letterSpacing: "0.05em" }}>
+            Conversation hooks
+          </p>
+          <div className="space-y-3">
+            {brief.conversation_hooks.map((hook, i) => (
+              <div key={i} className="rounded-xl bg-[#FAFAFA] p-4 group">
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-[14px] font-medium text-[--color-text-primary] leading-[1.5]">&ldquo;{hook.hook}&rdquo;</p>
+                  <button
+                    onClick={() => onCopy(hook.hook, `hook-${i}`)}
+                    className="shrink-0 text-[11px] text-[--color-text-tertiary] opacity-0 group-hover:opacity-100 transition-opacity hover:text-[--color-text-secondary]"
+                  >
+                    {copied === `hook-${i}` ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                <p className="mt-1.5 text-[12px] text-[--color-accent]">{hook.grounded_in}</p>
+                <p className="mt-1 text-[12px] text-[--color-text-tertiary]">{hook.why_it_lands}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Watch-outs */}
+      {brief.watch_outs && brief.watch_outs.length > 0 && (
+        <div className="rounded-2xl p-5" style={{ background: "rgba(245,158,11,0.05)", boxShadow: "var(--shadow-card)" }}>
+          <p className="text-[11px] font-semibold uppercase text-[#D97706] mb-3" style={{ letterSpacing: "0.05em" }}>
+            Watch out
+          </p>
+          <ul className="space-y-1.5">
+            {brief.watch_outs.map((item, i) => (
+              <li key={i} className="flex items-start gap-2 text-[13px] text-[--color-text-primary]">
+                <span className="mt-1 text-[#D97706]">!</span>
+                {item}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* The ask */}
+      {brief.the_ask && brief.the_ask.has_ask && brief.the_ask.what_you_want && (
+        <div className="rounded-2xl bg-[--color-card] p-5" style={{ boxShadow: "var(--shadow-card)", borderLeft: "3px solid #10B981" }}>
+          <p className="text-[11px] font-semibold uppercase text-[--color-text-tertiary] mb-2" style={{ letterSpacing: "0.05em" }}>
+            The ask
+          </p>
+          <p className="text-[14px] font-medium text-[--color-text-primary]">{brief.the_ask.what_you_want}</p>
+          {brief.the_ask.how_to_raise_it && (
+            <p className="mt-2 text-[13px] leading-[1.6] text-[--color-text-secondary]">{brief.the_ask.how_to_raise_it}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Old-format brief fallback — shows regenerate button
+function StaleInsightCard({ insight, onRegenerate, regenerating }: {
+  insight: Insight;
+  onRegenerate: () => void;
+  regenerating: boolean;
+}) {
+  return (
+    <div className="rounded-2xl bg-[--color-card] p-6" style={{ boxShadow: "var(--shadow-card)" }}>
+      <div className="flex items-center justify-between mb-3">
+        <span className="rounded-full px-2.5 py-1 text-[11px] font-medium" style={{ background: "#EFF6FF", color: "#3B82F6" }}>Prep Brief (outdated)</span>
+      </div>
+      <p className="text-[14px] text-[--color-text-tertiary]">This brief was generated with an older format. Regenerate for a richer, structured brief.</p>
+      <button onClick={onRegenerate} disabled={regenerating}
+        className="mt-4 rounded-full px-5 py-2 text-[13px] font-semibold text-white transition-all hover:-translate-y-px disabled:opacity-50"
+        style={{ background: "linear-gradient(135deg, #3B82F6, #2563EB)", boxShadow: "var(--shadow-button)" }}>
+        {regenerating ? "Regenerating..." : "Regenerate prep brief"}
+      </button>
+    </div>
+  );
+}
 
 export default function PersonDetailPage() {
   const params = useParams();
@@ -133,13 +331,23 @@ export default function PersonDetailPage() {
           ) : (
             <div className="space-y-4">
               {person.insights.map((ins) => {
+                // Prep brief: structured rendering or stale fallback
+                if (ins.insightType === "prep_brief") {
+                  const parsed = tryParsePrep(ins);
+                  if (parsed) {
+                    return <PrepBriefCard key={ins.id} brief={parsed} insight={ins} onCopy={copyText} copied={copied} onRegenerate={() => handleGenerate("prep_brief")} regenerating={generating === "prep_brief"} />;
+                  }
+                  return <StaleInsightCard key={ins.id} insight={ins} onRegenerate={() => handleGenerate("prep_brief")} regenerating={generating === "prep_brief"} />;
+                }
+
+                // Other insight types: default rendering
                 const badge = insightBadge[ins.insightType] ?? insightBadge.cross_reference;
                 return (
                   <div key={ins.id} className="rounded-2xl bg-[--color-card] p-6" style={{ boxShadow: "var(--shadow-card)" }}>
                     <div className="flex items-center justify-between mb-4">
                       <span className="rounded-full px-2.5 py-1 text-[11px] font-medium" style={{ background: badge.bg, color: badge.color }}>{badge.label}</span>
                       <button onClick={() => copyText(ins.content, ins.id)} className="text-[12px] text-[--color-text-tertiary] hover:text-[--color-text-secondary] transition-colors">
-                        {copied === ins.id ? "✓ Copied" : "Copy"}
+                        {copied === ins.id ? "Copied" : "Copy"}
                       </button>
                     </div>
                     <div className="text-[14px] leading-[1.7] text-[--color-text-primary] whitespace-pre-wrap">{ins.content}</div>
